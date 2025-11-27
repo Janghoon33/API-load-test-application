@@ -20,9 +20,17 @@ spring:
 server:
   port: 8080
 
+# CORS ?? ??
+spring.web.cors:
+  allowed-origins: "*"
+  allowed-methods: "*"
+  allowed-headers: "*"
+  allow-credentials: false
+
 loadtest:
   max-virtual-threads: 50000
   max-platform-threads: 500
   http-client:
     connect-timeout: 10s
     request-timeout: 30s
+

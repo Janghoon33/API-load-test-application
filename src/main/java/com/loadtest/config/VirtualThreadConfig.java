@@ -3,7 +3,6 @@ package com.loadtest.config;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.context.annotation.Primary;
 
 import java.net.http.HttpClient;
 import java.time.Duration;
@@ -21,9 +20,9 @@ public class VirtualThreadConfig {
 
     /**
      * 가상 스레드 Executor
+     * Java 21의 핵심 기능 - 경량 스레드로 수만 개 동시 실행 가능
      */
     @Bean(name = "virtualThreadExecutor")
-    @Primary
     public ExecutorService virtualThreadExecutor() {
         return Executors.newVirtualThreadPerTaskExecutor();
     }
@@ -37,13 +36,13 @@ public class VirtualThreadConfig {
     }
 
     /**
-     * HttpClient - HTTP/2 지원, 연결 재사용
+     * HttpClient - HTTP/1.1로 변경 (동시 스트림 제한 회피)
      */
     @Bean
     public HttpClient httpClient() {
         return HttpClient.newBuilder()
                 .connectTimeout(connectTimeout)
-                .version(HttpClient.Version.HTTP_2)
+                .version(HttpClient.Version.HTTP_1_1)
                 .build();
     }
 }

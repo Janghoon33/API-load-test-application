@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>실시간 부하 테스트 모니터링</title>
+    <script src="https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/stompjs@2.3.3/lib/stomp.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            color: white;
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 2.5em;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 25px;
+            margin-bottom: 20px;
+            box-shadow: 0 8px 16px rgba(0,0,0,0.2);
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #333;
+        }
+
+        input, select {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #e0e0e0;
+            border-radius: 6px;
+            font-size: 14px;
+            transition: border 0.3s;
+        }
+
+        input:focus, select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 15px;
+            border: none;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .metric-card {
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .metric-label {
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 5px;
+            text-transform: uppercase;
+        }
+
+        .metric-value {
+            font-size: 28px;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .metric-value.success {
+            color: #10b981;
+        }
+
+        .metric-value.error {
+            color: #ef4444;
+        }
+
+        .metric-value.tps {
+            color: #3b82f6;
+        }
+
+        .progress-container {
+            margin: 20px 0;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 30px;
+            background: #e0e0e0;
+            border-radius: 15px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #10b981, #059669);
+            transition: width 0.3s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+        }
+
+        .status {
+            display: inline-block;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-weight: bold;
+            font-size: 14px;
+            margin-bottom: 15px;
+        }
+
+        .status-running {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .status-completed {
+            background: #d1fae5;
+            color: #065f46;
+        }
+
+        .log {
+            background: #1e293b;
+            color: #e2e8f0;
+            padding: 15px;
+            border-radius: 6px;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .log-entry {
+            margin-bottom: 5px;
+            padding: 5px;
+            border-left: 3px solid #3b82f6;
+            padding-left: 10px;
+        }
+
+        .connection-status {
+            text-align: center;
+            padding: 10px;
+            border-radius: 6px;
+            margin-bottom: 15px;
+            font-weight: bold;
+        }
+
+        .connected {
+            background: #d1fae5;
+            color: #065f46;
+        }
+
+        .disconnected {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>실시간 부하 테스트 모니터링</h1>
+
+    <!-- 연결 상태 -->
+    <div id="connectionStatus" class="connection-status disconnected">
+        🔴 WebSocket 연결 안 됨
+    </div>
+
+    <!-- 테스트 설정 -->
+    <div class="card">
+        <h2>테스트 설정</h2>
+        <div class="form-group">
+            <label>API URL</label>
+            <input type="text" id="apiUrl" value="https://jsonplaceholder.typicode.com/posts/1">
+        </div>
+
+        <div class="form-group">
+            <label>스레드 타입</label>
+            <select id="threadType">
+                <option value="VIRTUAL">가상 스레드 (Virtual)</option>
+                <option value="PLATFORM">일반 스레드 (Platform)</option>
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label>가상 스레드 수</label>
+            <input type="number" id="virtualThreads" value="1000" min="1">
+        </div>
+
+        <div class="form-group">
+            <label>스레드당 요청 수</label>
+            <input type="number" id="requestsPerThread" value="10" min="1">
+        </div>
+
+        <div class="form-group">
+            <label>HTTP 메서드</label>
+            <select id="httpMethod">
+                <option value="GET">GET</option>
+                <option value="POST">POST</option>
+                <option value="PUT">PUT</option>
+                <option value="DELETE">DELETE</option>
+            </select>
+        </div>
+
+        <button class="btn btn-primary" id="startBtn" onclick="startTest()">
+            테스트 시작
+        </button>
+    </div>
+
+    <!-- 실시간 모니터링 -->
+    <div class="card" id="monitoringPanel" style="display: none;">
+        <h2>실시간 모니터링</h2>
+
+        <div id="statusBadge"></div>
+
+        <div class="progress-container">
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressBar" style="width: 0%">0%</div>
+            </div>
+        </div>
+
+        <div class="metrics-grid">
+            <div class="metric-card">
+                <div class="metric-label">진행률</div>
+                <div class="metric-value" id="progressText">0%</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">완료 / 총</div>
+                <div class="metric-value" id="requestsText">0 / 0</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">성공</div>
+                <div class="metric-value success" id="successText">0</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">실패</div>
+                <div class="metric-value error" id="failText">0</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">현재 TPS</div>
+                <div class="metric-value tps" id="tpsText">0</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">경과 시간</div>
+                <div class="metric-value" id="elapsedText">0s</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 로그 -->
+    <div class="card">
+        <h2>로그</h2>
+        <div class="log" id="logPanel"></div>
+    </div>
+</div>
+
+<script>
+    let stompClient = null;
+    let currentTestId = null;
+
+    // WebSocket 연결
+    function connect() {
+        const socket = new SockJS('http://localhost:8080/ws');
+        stompClient = Stomp.over(socket);
+
+        stompClient.debug = null; // 디버그 로그 끄기
+
+        stompClient.connect({}, function(frame) {
+            addLog('✅ WebSocket 연결 성공');
+            document.getElementById('connectionStatus').className = 'connection-status connected';
+            document.getElementById('connectionStatus').textContent = '🟢 WebSocket 연결됨';
+            document.getElementById('startBtn').disabled = false;
+        }, function(error) {
+            addLog('❌ WebSocket 연결 실패: ' + error);
+            document.getElementById('connectionStatus').className = 'connection-status disconnected';
+            document.getElementById('connectionStatus').textContent = '🔴 WebSocket 연결 안 됨 - 서버를 실행하세요';
+            setTimeout(connect, 3000); // 3초 후 재연결 시도
+        });
+    }
+
+    // 테스트 시작
+    async function startTest() {
+        const config = {
+            url: document.getElementById('apiUrl').value,
+            threadType: document.getElementById('threadType').value,
+            virtualThreads: parseInt(document.getElementById('virtualThreads').value),
+            requestsPerThread: parseInt(document.getElementById('requestsPerThread').value)
+        };
+
+        document.getElementById('startBtn').disabled = true;
+        document.getElementById('startBtn').textContent = '테스트 실행 중...';
+        document.getElementById('monitoringPanel').style.display = 'block';
+
+        addLog(' 테스트 시작: ' + JSON.stringify(config));
+
+        try {
+            const response = await fetch('http://localhost:8080/api/tests/execute', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(config)
+            });
+
+            if (!response.ok) {
+                throw new Error('서버 응답 오류: ' + response.status);
+            }
+
+            const result = await response.json();
+            currentTestId = result.testId;
+
+            addLog(' 테스트 ID: ' + currentTestId);
+            addLog(' 구독 경로: /topic/metrics/' + currentTestId);
+
+            // WebSocket 구독
+            subscribeToMetrics(currentTestId);
+
+        } catch (error) {
+            addLog('❌ 테스트 시작 실패: ' + error);
+            alert('테스트 시작 실패!\n\n1. 서버가 실행 중인지 확인하세요\n2. URL이 올바른지 확인하세요\n\n' + error);
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('startBtn').textContent = '테스트 시작';
+        }
+    }
+
+    // 메트릭 구독
+    function subscribeToMetrics(testId) {
+        // 실시간 메트릭 구독
+        stompClient.subscribe('/topic/metrics/' + testId, function(message) {
+            const metric = JSON.parse(message.body);
+            updateMetrics(metric);
+        });
+
+        // 완료 메시지 구독
+        stompClient.subscribe('/topic/test-complete/' + testId, function(message) {
+            const result = JSON.parse(message.body);
+            onTestComplete(result);
+        });
+
+        addLog('✅ WebSocket 구독 완료');
+    }
+
+    // 메트릭 업데이트
+    function updateMetrics(metric) {
+        const progress = metric.progress.toFixed(1);
+        document.getElementById('progressBar').style.width = progress + '%';
+        document.getElementById('progressBar').textContent = progress + '%';
+
+        document.getElementById('progressText').textContent = progress + '%';
+        document.getElementById('requestsText').textContent =
+            metric.completedRequests.toLocaleString() + ' / ' + metric.totalRequests.toLocaleString();
+        document.getElementById('successText').textContent = metric.successCount.toLocaleString();
+        document.getElementById('failText').textContent = metric.failCount.toLocaleString();
+        document.getElementById('tpsText').textContent = metric.currentTps.toFixed(1);
+        document.getElementById('elapsedText').textContent =
+            (metric.elapsedTimeMs / 1000).toFixed(1) + 's';
+
+        const statusHtml = metric.status === 'RUNNING'
+            ? '<span class="status status-running">🔄 실행 중</span>'
+            : '<span class="status status-completed">✅ 완료</span>';
+        document.getElementById('statusBadge').innerHTML = statusHtml;
+
+        // 로그는 20%마다만 출력 (너무 많은 로그 방지)
+        if (metric.completedRequests % Math.max(1, Math.floor(metric.totalRequests / 5)) === 0) {
+            addLog(`📊 진행률 ${progress}% | 성공: ${metric.successCount} | 실패: ${metric.failCount} | TPS: ${metric.currentTps.toFixed(1)}`);
+        }
+    }
+
+    // 테스트 완료
+    function onTestComplete(result) {
+        addLog('🎉 테스트 완료!');
+        addLog('📈 총 요청: ' + result.totalRequests.toLocaleString());
+        addLog('✅ 성공: ' + result.successCount.toLocaleString());
+        addLog('❌ 실패: ' + result.failCount.toLocaleString());
+        addLog('⚡ TPS: ' + result.tps.toFixed(2));
+        addLog('⏱️ 평균 응답시간: ' + result.avgResponseTimeMs + 'ms');
+        addLog('💾 실행 ID: ' + result.executionId);
+
+        document.getElementById('startBtn').disabled = false;
+        document.getElementById('startBtn').textContent = '테스트 시작';
+
+        const successRate = result.successRate.toFixed(2);
+        const message = `테스트 완료!\n\n` +
+            `총 요청: ${result.totalRequests.toLocaleString()}건\n` +
+            `성공률: ${successRate}%\n` +
+            `TPS: ${result.tps.toFixed(2)}\n` +
+            `평균 응답: ${result.avgResponseTimeMs}ms\n\n` +
+            `실행 ID: ${result.executionId}`;
+        alert(message);
+    }
+
+    // 로그 추가
+    function addLog(message) {
+        const logPanel = document.getElementById('logPanel');
+        const timestamp = new Date().toLocaleTimeString();
+        const entry = document.createElement('div');
+        entry.className = 'log-entry';
+        entry.textContent = `[${timestamp}] ${message}`;
+        logPanel.appendChild(entry);
+        logPanel.scrollTop = logPanel.scrollHeight;
+
+        // 로그가 100개 넘으면 오래된 것 삭제
+        if (logPanel.children.length > 100) {
+            logPanel.removeChild(logPanel.firstChild);
+        }
+    }
+
+    // 페이지 로드 시 WebSocket 연결
+    window.onload = function() {
+        addLog('🌐 페이지 로드 완료');
+        addLog('🔌 WebSocket 연결 시도 중...');
+        document.getElementById('startBtn').disabled = true; // 연결될 때까지 비활성화
+        connect();
+    };
+</script>
+</body>
+</html>

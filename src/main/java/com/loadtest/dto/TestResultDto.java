@@ -36,5 +36,9 @@ public class TestResultDto {
     private LocalDateTime startedAt;
 
     private LocalDateTime completedAt;
-}
 
+    // 성공률 계산
+    public double getSuccessRate() {
+        return totalRequests > 0 ? (successCount * 100.0) / totalRequests : 0.0;
+    }
+}

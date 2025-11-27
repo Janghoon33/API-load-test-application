@@ -2,11 +2,13 @@ package com.loadtest.service;
 
 import com.loadtest.dto.TestConfigDto;
 import com.loadtest.dto.TestResultDto;
+import com.loadtest.dto.RealtimeMetricDto;
 import com.loadtest.entity.TestExecution;
 import com.loadtest.repository.TestExecutionRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
 import java.net.URI;
@@ -21,6 +23,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
+
 @Slf4j
 @Service
 public class TestExecutionService {
@@ -29,24 +32,34 @@ public class TestExecutionService {
     private final ExecutorService platformExecutor;
     private final HttpClient httpClient;
     private final TestExecutionRepository executionRepository;
+    private final SimpMessagingTemplate messagingTemplate;
 
     public TestExecutionService(
             @Qualifier("virtualThreadExecutor") ExecutorService virtualExecutor,
             @Qualifier("platformThreadExecutor") ExecutorService platformExecutor,
             HttpClient httpClient,
-            TestExecutionRepository executionRepository) {
+            TestExecutionRepository executionRepository,
+            SimpMessagingTemplate messagingTemplate) {
         this.virtualExecutor = virtualExecutor;
         this.platformExecutor = platformExecutor;
         this.httpClient = httpClient;
         this.executionRepository = executionRepository;
+        this.messagingTemplate = messagingTemplate;
     }
 
     /**
      * 부하 테스트 실행
      */
     public TestResultDto executeTest(TestConfigDto config) {
-        log.info("테스트 시작 - Type: {}, Threads: {}, Requests/Thread: {}",
-                config.getThreadType(), config.getVirtualThreads(), config.getRequestsPerThread());
+        return executeTestWithId(generateTestId(), config);
+    }
+
+    /**
+     * testId를 받아서 실행 (WebSocket용)
+     */
+    public TestResultDto executeTestWithId(String testId, TestConfigDto config) {
+        log.info("[{}] 테스트 시작 - Type: {}, Threads: {}, Requests/Thread: {}",
+                testId, config.getThreadType(), config.getVirtualThreads(), config.getRequestsPerThread());
 
         ExecutorService executor = config.getThreadType() == TestConfigDto.ThreadType.VIRTUAL
                 ? virtualExecutor
@@ -58,9 +71,15 @@ public class TestExecutionService {
         // 통계 수집용 변수들
         AtomicInteger successCount = new AtomicInteger(0);
         AtomicInteger failCount = new AtomicInteger(0);
+        AtomicInteger completedCount = new AtomicInteger(0);
         AtomicLong totalResponseTime = new AtomicLong(0);
         AtomicLong minResponseTime = new AtomicLong(Long.MAX_VALUE);
         AtomicLong maxResponseTime = new AtomicLong(0);
+
+        int totalRequests = config.getVirtualThreads() * config.getRequestsPerThread();
+
+        // 초기 상태 전송
+        sendRealtimeMetric(testId, totalRequests, 0, 0, 0, startMillis, "RUNNING");
 
         List<CompletableFuture<Void>> futures = new ArrayList<>();
 
@@ -72,8 +91,17 @@ public class TestExecutionService {
                 // 각 스레드가 설정된 횟수만큼 요청 실행
                 for (int j = 0; j < config.getRequestsPerThread(); j++) {
                     executeRequest(config, threadId, j,
-                            successCount, failCount, totalResponseTime,
+                            successCount, failCount, completedCount, totalResponseTime,
                             minResponseTime, maxResponseTime);
+
+                    // 실시간 메트릭 전송 (자주!)
+                    int completed = completedCount.get();
+
+                    // 100개마다 또는 완료 시 전송 (기존: 10개)
+                    if (completed % 100 == 0 || completed == totalRequests) {
+                        sendRealtimeMetric(testId, totalRequests, completed,
+                                successCount.get(), failCount.get(), startMillis, "RUNNING");
+                    }
                 }
             }, executor);
 
@@ -86,7 +114,7 @@ public class TestExecutionService {
         long endMillis = System.currentTimeMillis();
         LocalDateTime endTime = LocalDateTime.now();
 
-        // 결과 계산
+        // 최종 결과 계산
         TestResultDto result = buildResult(config, successCount.get(), failCount.get(),
                 totalResponseTime.get(), minResponseTime.get(), maxResponseTime.get(),
                 startTime, endTime, startMillis, endMillis);
@@ -95,10 +123,52 @@ public class TestExecutionService {
         Long executionId = saveExecution(config, result, startTime, endTime);
         result.setExecutionId(executionId);
 
-        log.info("테스트 완료 - ID: {}, Success: {}, Fail: {}, TPS: {}",
-                executionId, result.getSuccessCount(), result.getFailCount(), result.getTps());
+        // 완료 상태 전송
+        sendRealtimeMetric(testId, totalRequests, totalRequests,
+                successCount.get(), failCount.get(), startMillis, "COMPLETED");
+
+        // 최종 결과 전송
+        messagingTemplate.convertAndSend("/topic/test-complete/" + testId, result);
+
+        log.info("[{}] 테스트 완료 - ID: {}, Success: {}, Fail: {}, TPS: {}",
+                testId, executionId, result.getSuccessCount(), result.getFailCount(), result.getTps());
 
         return result;
+    }
+
+    /**
+     * 실시간 메트릭 전송
+     */
+    private void sendRealtimeMetric(String testId, int totalRequests, int completed,
+                                    int success, int fail, long startMillis, String status) {
+        long now = System.currentTimeMillis();
+        long elapsed = now - startMillis;
+        double progress = totalRequests > 0 ? (completed * 100.0) / totalRequests : 0.0;
+        double currentTps = elapsed > 0 ? (completed * 1000.0) / elapsed : 0.0;
+
+        RealtimeMetricDto metric = RealtimeMetricDto.builder()
+                .testId(testId)
+                .totalRequests(totalRequests)
+                .completedRequests(completed)
+                .successCount(success)
+                .failCount(fail)
+                .progress(progress)
+                .currentTps(currentTps)
+                .avgResponseTimeMs(0) // 필요시 계산 추가
+                .elapsedTimeMs(elapsed)
+                .timestamp(now)
+                .status(status)
+                .build();
+
+        messagingTemplate.convertAndSend("/topic/metrics/" + testId, metric);
+    }
+
+    /**
+     * 테스트 ID 생성
+     */
+    private String generateTestId() {
+        return "test-" + System.currentTimeMillis() + "-" +
+                (int)(Math.random() * 1000);
     }
 
     /**
@@ -106,8 +176,8 @@ public class TestExecutionService {
      */
     private void executeRequest(TestConfigDto config, int threadId, int requestId,
                                 AtomicInteger successCount, AtomicInteger failCount,
-                                AtomicLong totalResponseTime, AtomicLong minResponseTime,
-                                AtomicLong maxResponseTime) {
+                                AtomicInteger completedCount, AtomicLong totalResponseTime,
+                                AtomicLong minResponseTime, AtomicLong maxResponseTime) {
         try {
             long reqStart = System.currentTimeMillis();
 
@@ -115,8 +185,9 @@ public class TestExecutionService {
             HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
                     .uri(URI.create(config.getUrl()));
 
-            // HTTP 메서드 설정
-            switch (config.getMethod().toUpperCase()) {
+            // HTTP 메서드 설정 (null 체크)
+            String method = config.getMethodOrDefault();
+            switch (method.toUpperCase()) {
                 case "POST":
                     requestBuilder.POST(HttpRequest.BodyPublishers.ofString(
                             config.getBody() != null ? config.getBody() : ""));
@@ -149,6 +220,7 @@ public class TestExecutionService {
             totalResponseTime.addAndGet(reqTime);
             updateMin(minResponseTime, reqTime);
             updateMax(maxResponseTime, reqTime);
+            completedCount.incrementAndGet();
 
             if (response.statusCode() >= 200 && response.statusCode() < 300) {
                 successCount.incrementAndGet();
@@ -160,6 +232,7 @@ public class TestExecutionService {
 
         } catch (Exception e) {
             failCount.incrementAndGet();
+            completedCount.incrementAndGet();
             log.error("Thread-{} Request-{} 오류: {}", threadId, requestId, e.getMessage());
         }
     }

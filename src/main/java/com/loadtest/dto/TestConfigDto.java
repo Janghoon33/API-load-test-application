@@ -28,16 +28,25 @@ public class TestConfigDto {
     @Min(value = 1, message = "스레드당 요청 수는 최소 1 이상이어야 합니다")
     private int requestsPerThread;
 
-    private String method = "GET"; // GET, POST, PUT, DELETE
+    private String method; // GET, POST, PUT, DELETE
 
     private Map<String, String> headers;
 
     private String body;
 
-    private Boolean enableLogging = false;
+    private Boolean enableLogging;
 
     public enum ThreadType {
         VIRTUAL, PLATFORM
     }
 
+    // method null 체크 헬퍼 메서드
+    public String getMethodOrDefault() {
+        return method != null && !method.isBlank() ? method : "GET";
+    }
+
+    // enableLogging null 체크용 헬퍼 메서드
+    public boolean isEnableLogging() {
+        return enableLogging != null && enableLogging;
+    }
 }
