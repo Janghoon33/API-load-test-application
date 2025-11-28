@@ -3,9 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>실시간 부하 테스트 모니터링</title>
+    <title>API Load Test Service</title>
     <script src="https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/stompjs@2.3.3/lib/stomp.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
         * {
             margin: 0;
@@ -14,458 +16,889 @@
         }
 
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            padding: 20px;
-            min-height: 100vh;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: #f5f7fa;
+            color: #2d3748;
+            height: 100vh;
+            overflow: hidden;
         }
 
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
+        /* Layout */
+        .layout {
+            display: flex;
+            height: 100vh;
         }
 
-        h1 {
+        /* Sidebar */
+        .sidebar {
+            width: 260px;
+            background: #1a202c;
             color: white;
-            text-align: center;
-            margin-bottom: 30px;
-            font-size: 2.5em;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+            display: flex;
+            flex-direction: column;
+            border-right: 1px solid #2d3748;
         }
 
+        .sidebar-header {
+            padding: 20px;
+            border-bottom: 1px solid #2d3748;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 18px;
+            font-weight: 700;
+        }
+
+        .logo-icon {
+            width: 32px;
+            height: 32px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+        }
+
+        .nav-menu {
+            flex: 1;
+            padding: 20px 0;
+            overflow-y: auto;
+        }
+
+        .nav-section {
+            margin-bottom: 24px;
+        }
+
+        .nav-section-title {
+            padding: 0 20px;
+            font-size: 11px;
+            font-weight: 600;
+            color: #a0aec0;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+        }
+
+        .nav-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 20px;
+            color: #cbd5e0;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 14px;
+        }
+
+        .nav-item:hover {
+            background: #2d3748;
+            color: white;
+        }
+
+        .nav-item.active {
+            background: #667eea;
+            color: white;
+        }
+
+        .nav-icon {
+            font-size: 18px;
+        }
+
+        /* Main Content */
+        .main-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* Top Bar */
+        .top-bar {
+            height: 60px;
+            background: white;
+            border-bottom: 1px solid #e2e8f0;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 24px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        }
+
+        .top-bar-left {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .page-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #1a202c;
+        }
+
+        .connection-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        .connection-badge.connected {
+            background: #d1fae5;
+            color: #065f46;
+        }
+
+        .connection-badge.disconnected {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: currentColor;
+        }
+
+        /* Content Area */
+        .content-area {
+            flex: 1;
+            overflow-y: auto;
+            padding: 24px;
+        }
+
+        /* Card */
         .card {
             background: white;
             border-radius: 12px;
-            padding: 25px;
+            border: 1px solid #e2e8f0;
             margin-bottom: 20px;
-            box-shadow: 0 8px 16px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+
+        .card-header {
+            padding: 16px 20px;
+            border-bottom: 1px solid #e2e8f0;
+            background: #f8fafc;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .card-title {
+            font-size: 15px;
+            font-weight: 600;
+            color: #1a202c;
+        }
+
+        .card-body {
+            padding: 20px;
+        }
+
+        /* Form */
+        .form-row {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 16px;
+            margin-bottom: 16px;
         }
 
         .form-group {
-            margin-bottom: 15px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .form-group.full-width {
+            grid-column: 1 / -1;
         }
 
         label {
-            display: block;
-            margin-bottom: 5px;
-            font-weight: bold;
-            color: #333;
+            font-size: 13px;
+            font-weight: 500;
+            color: #4a5568;
         }
 
         input, select {
-            width: 100%;
-            padding: 10px;
-            border: 2px solid #e0e0e0;
+            padding: 10px 12px;
+            border: 1px solid #e2e8f0;
             border-radius: 6px;
             font-size: 14px;
-            transition: border 0.3s;
+            font-family: 'Inter', sans-serif;
+            transition: all 0.2s;
+            background: white;
         }
 
         input:focus, select:focus {
             outline: none;
             border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
         }
 
+        /* Buttons */
         .btn {
-            width: 100%;
-            padding: 15px;
+            padding: 10px 20px;
             border: none;
             border-radius: 6px;
-            font-size: 16px;
-            font-weight: bold;
+            font-size: 14px;
+            font-weight: 600;
             cursor: pointer;
-            transition: all 0.3s;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
         }
 
         .btn-primary {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: #667eea;
             color: white;
         }
 
         .btn-primary:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+            background: #5568d3;
         }
 
         .btn-primary:disabled {
-            opacity: 0.6;
+            opacity: 0.5;
             cursor: not-allowed;
-            transform: none;
         }
 
-        .metrics-grid {
+        .btn-group {
+            display: flex;
+            gap: 12px;
+        }
+
+        /* Stats Grid */
+        .stats-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 16px;
             margin-bottom: 20px;
         }
 
-        .metric-card {
-            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+        .stat-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
             padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+
+        .stat-card.success {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+        }
+
+        .stat-card.danger {
+            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+        }
+
+        .stat-label {
+            font-size: 13px;
+            opacity: 0.9;
+            margin-bottom: 8px;
+        }
+
+        .stat-value {
+            font-size: 32px;
+            font-weight: 700;
+        }
+
+        .stat-icon {
+            font-size: 24px;
+            opacity: 0.8;
+            margin-bottom: 8px;
+        }
+
+        /* Progress */
+        .progress-section {
+            margin-bottom: 24px;
+        }
+
+        .progress-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .progress-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #1a202c;
+        }
+
+        .progress-percent {
+            font-size: 14px;
+            font-weight: 600;
+            color: #667eea;
+        }
+
+        .progress-bar-container {
+            height: 32px;
+            background: #e2e8f0;
             border-radius: 8px;
-            text-align: center;
-        }
-
-        .metric-label {
-            font-size: 12px;
-            color: #666;
-            margin-bottom: 5px;
-            text-transform: uppercase;
-        }
-
-        .metric-value {
-            font-size: 28px;
-            font-weight: bold;
-            color: #333;
-        }
-
-        .metric-value.success {
-            color: #10b981;
-        }
-
-        .metric-value.error {
-            color: #ef4444;
-        }
-
-        .metric-value.tps {
-            color: #3b82f6;
-        }
-
-        .progress-container {
-            margin: 20px 0;
-        }
-
-        .progress-bar {
-            width: 100%;
-            height: 30px;
-            background: #e0e0e0;
-            border-radius: 15px;
             overflow: hidden;
             position: relative;
         }
 
-        .progress-fill {
+        .progress-bar-fill {
             height: 100%;
-            background: linear-gradient(90deg, #10b981, #059669);
-            transition: width 0.3s;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            transition: width 0.3s ease;
             display: flex;
             align-items: center;
-            justify-content: center;
+            padding: 0 12px;
             color: white;
-            font-weight: bold;
+            font-size: 13px;
+            font-weight: 600;
         }
 
-        .status {
-            display: inline-block;
-            padding: 8px 16px;
-            border-radius: 20px;
-            font-weight: bold;
+        /* Charts */
+        .charts-container {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .chart-wrapper {
+            position: relative;
+            height: 300px;
+        }
+
+        /* Tabs */
+        .tabs {
+            display: flex;
+            gap: 2px;
+            border-bottom: 2px solid #e2e8f0;
+            margin-bottom: 20px;
+        }
+
+        .tab {
+            padding: 12px 20px;
             font-size: 14px;
-            margin-bottom: 15px;
+            font-weight: 500;
+            color: #718096;
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+            transition: all 0.2s;
         }
 
-        .status-running {
+        .tab:hover {
+            color: #667eea;
+        }
+
+        .tab.active {
+            color: #667eea;
+            border-bottom-color: #667eea;
+        }
+
+        /* Log Terminal */
+        .log-terminal {
+            background: #1e293b;
+            color: #e2e8f0;
+            padding: 16px;
+            border-radius: 8px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 13px;
+            height: 300px;
+            overflow-y: auto;
+        }
+
+        .log-line {
+            padding: 4px 0;
+            line-height: 1.6;
+        }
+
+        .log-line.info { color: #60a5fa; }
+        .log-line.success { color: #34d399; }
+        .log-line.error { color: #f87171; }
+        .log-line.warning { color: #fbbf24; }
+
+        /* Badge */
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .badge.running {
             background: #fef3c7;
             color: #92400e;
         }
 
-        .status-completed {
+        .badge.completed {
             background: #d1fae5;
             color: #065f46;
         }
 
-        .log {
-            background: #1e293b;
-            color: #e2e8f0;
-            padding: 15px;
-            border-radius: 6px;
-            font-family: 'Courier New', monospace;
-            font-size: 13px;
-            max-height: 200px;
-            overflow-y: auto;
+        /* Scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
         }
 
-        .log-entry {
-            margin-bottom: 5px;
-            padding: 5px;
-            border-left: 3px solid #3b82f6;
-            padding-left: 10px;
+        ::-webkit-scrollbar-track {
+            background: #f1f5f9;
         }
 
-        .connection-status {
-            text-align: center;
-            padding: 10px;
-            border-radius: 6px;
-            margin-bottom: 15px;
-            font-weight: bold;
+        ::-webkit-scrollbar-thumb {
+            background: #cbd5e0;
+            border-radius: 4px;
         }
 
-        .connected {
-            background: #d1fae5;
-            color: #065f46;
+        ::-webkit-scrollbar-thumb:hover {
+            background: #a0aec0;
         }
 
-        .disconnected {
-            background: #fee2e2;
-            color: #991b1b;
+        /* Responsive */
+        @media (max-width: 1024px) {
+            .sidebar {
+                width: 70px;
+            }
+
+            .nav-item span {
+                display: none;
+            }
+
+            .logo span {
+                display: none;
+            }
+
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .charts-container {
+                grid-template-columns: 1fr;
+            }
         }
     </style>
 </head>
 <body>
-<div class="container">
-    <h1>실시간 부하 테스트 모니터링</h1>
-
-    <!-- 연결 상태 -->
-    <div id="connectionStatus" class="connection-status disconnected">
-        🔴 WebSocket 연결 안 됨
-    </div>
-
-    <!-- 테스트 설정 -->
-    <div class="card">
-        <h2>테스트 설정</h2>
-        <div class="form-group">
-            <label>API URL</label>
-            <input type="text" id="apiUrl" value="https://jsonplaceholder.typicode.com/posts/1">
-        </div>
-
-        <div class="form-group">
-            <label>스레드 타입</label>
-            <select id="threadType">
-                <option value="VIRTUAL">가상 스레드 (Virtual)</option>
-                <option value="PLATFORM">일반 스레드 (Platform)</option>
-            </select>
-        </div>
-
-        <div class="form-group">
-            <label>가상 스레드 수</label>
-            <input type="number" id="virtualThreads" value="1000" min="1">
-        </div>
-
-        <div class="form-group">
-            <label>스레드당 요청 수</label>
-            <input type="number" id="requestsPerThread" value="10" min="1">
-        </div>
-
-        <div class="form-group">
-            <label>HTTP 메서드</label>
-            <select id="httpMethod">
-                <option value="GET">GET</option>
-                <option value="POST">POST</option>
-                <option value="PUT">PUT</option>
-                <option value="DELETE">DELETE</option>
-            </select>
-        </div>
-
-        <button class="btn btn-primary" id="startBtn" onclick="startTest()">
-            테스트 시작
-        </button>
-    </div>
-
-    <!-- 실시간 모니터링 -->
-    <div class="card" id="monitoringPanel" style="display: none;">
-        <h2>실시간 모니터링</h2>
-
-        <div id="statusBadge"></div>
-
-        <div class="progress-container">
-            <div class="progress-bar">
-                <div class="progress-fill" id="progressBar" style="width: 0%">0%</div>
+<div class="layout">
+    <!-- Sidebar -->
+    <div class="sidebar">
+        <div class="sidebar-header">
+            <div class="logo">
+                <div class="logo-icon">⚡</div>
+                <span>LoadTest</span>
             </div>
         </div>
 
-        <div class="metrics-grid">
-            <div class="metric-card">
-                <div class="metric-label">진행률</div>
-                <div class="metric-value" id="progressText">0%</div>
+        <div class="nav-menu">
+            <div class="nav-section">
+                <div class="nav-section-title">Main</div>
+                <div class="nav-item active">
+                    <span class="nav-icon">🎯</span>
+                    <span>Load Test</span>
+                </div>
+                <div class="nav-item">
+                    <span class="nav-icon">📊</span>
+                    <span>Dashboard</span>
+                </div>
+                <div class="nav-item">
+                    <span class="nav-icon">📁</span>
+                    <span>History</span>
+                </div>
             </div>
-            <div class="metric-card">
-                <div class="metric-label">완료 / 총</div>
-                <div class="metric-value" id="requestsText">0 / 0</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-label">성공</div>
-                <div class="metric-value success" id="successText">0</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-label">실패</div>
-                <div class="metric-value error" id="failText">0</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-label">현재 TPS</div>
-                <div class="metric-value tps" id="tpsText">0</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-label">경과 시간</div>
-                <div class="metric-value" id="elapsedText">0s</div>
+
+            <div class="nav-section">
+                <div class="nav-section-title">Settings</div>
+                <div class="nav-item">
+                    <span class="nav-icon">⚙️</span>
+                    <span>Settings</span>
+                </div>
+                <div class="nav-item">
+                    <span class="nav-icon">📖</span>
+                    <span>Docs</span>
+                </div>
             </div>
         </div>
     </div>
 
-    <!-- 로그 -->
-    <div class="card">
-        <h2>로그</h2>
-        <div class="log" id="logPanel"></div>
+    <!-- Main Content -->
+    <div class="main-content">
+        <!-- Top Bar -->
+        <div class="top-bar">
+            <div class="top-bar-left">
+                <div class="page-title">API Load Test Service</div>
+            </div>
+            <div id="connectionStatus" class="connection-badge disconnected">
+                <div class="status-dot"></div>
+                <span>Disconnected</span>
+            </div>
+        </div>
+
+        <!-- Content Area -->
+        <div class="content-area">
+            <!-- Test Configuration Card -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-title">🔧 Test Configuration</div>
+                </div>
+                <div class="card-body">
+                    <div class="form-row">
+                        <div class="form-group full-width">
+                            <label>API Endpoint</label>
+                            <input type="text" id="apiUrl" value="https://jsonplaceholder.typicode.com/posts/1" placeholder="Enter API endpoint">
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Thread Type</label>
+                            <select id="threadType">
+                                <option value="VIRTUAL">Virtual Threads</option>
+                                <option value="PLATFORM">Platform Threads</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label>HTTP Method</label>
+                            <select id="httpMethod">
+                                <option value="GET">GET</option>
+                                <option value="POST">POST</option>
+                                <option value="PUT">PUT</option>
+                                <option value="DELETE">DELETE</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Virtual Threads</label>
+                            <input type="number" id="virtualThreads" value="1000" min="1">
+                        </div>
+
+                        <div class="form-group">
+                            <label>Requests per Thread</label>
+                            <input type="number" id="requestsPerThread" value="10" min="1">
+                        </div>
+                    </div>
+
+                    <div class="btn-group">
+                        <button class="btn btn-primary" id="startBtn" onclick="startTest()">
+                            <span>▶️</span>
+                            <span>Run Test</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Real-time Monitoring -->
+            <div id="monitoringSection" style="display: none;">
+                <!-- Stats Grid -->
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon">📊</div>
+                        <div class="stat-label">Progress</div>
+                        <div class="stat-value" id="progressValue">0%</div>
+                    </div>
+
+                    <div class="stat-card success">
+                        <div class="stat-icon">✅</div>
+                        <div class="stat-label">Success Rate</div>
+                        <div class="stat-value" id="successRate">0%</div>
+                    </div>
+
+                    <div class="stat-card">
+                        <div class="stat-icon">⚡</div>
+                        <div class="stat-label">Current TPS</div>
+                        <div class="stat-value" id="tpsValue">0</div>
+                    </div>
+                </div>
+
+                <!-- Progress Bar -->
+                <div class="card">
+                    <div class="card-body">
+                        <div class="progress-section">
+                            <div class="progress-header">
+                                <div class="progress-title">
+                                    <span id="statusBadge"></span>
+                                    Test Progress
+                                </div>
+                                <div class="progress-percent" id="progressPercent">0%</div>
+                            </div>
+                            <div class="progress-bar-container">
+                                <div class="progress-bar-fill" id="progressBar" style="width: 0%">
+                                    <span id="progressText">0 / 0</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Charts -->
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">📈 Performance Metrics</div>
+                    </div>
+                    <div class="card-body">
+                        <div class="charts-container">
+                            <div class="chart-wrapper">
+                                <canvas id="tpsChart"></canvas>
+                            </div>
+                            <div class="chart-wrapper">
+                                <canvas id="statusChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Logs -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-title">📝 Logs</div>
+                </div>
+                <div class="card-body">
+                    <div class="log-terminal" id="logTerminal"></div>
+                </div>
+            </div>
+        </div>
     </div>
 </div>
 
 <script>
     let stompClient = null;
     let currentTestId = null;
+    let tpsChart = null;
+    let statusChart = null;
+    let tpsData = [];
+    let timeLabels = [];
 
-    // WebSocket 연결
-    function connect() {
-        const socket = new SockJS('http://localhost:8080/ws');
-        stompClient = Stomp.over(socket);
+    // Initialize Charts
+    function initCharts() {
+        const tpsCtx = document.getElementById('tpsChart');
+        const statusCtx = document.getElementById('statusChart');
 
-        stompClient.debug = null; // 디버그 로그 끄기
+        if (!tpsCtx || !statusCtx) return;
 
-        stompClient.connect({}, function(frame) {
-            addLog('✅ WebSocket 연결 성공');
-            document.getElementById('connectionStatus').className = 'connection-status connected';
-            document.getElementById('connectionStatus').textContent = '🟢 WebSocket 연결됨';
-            document.getElementById('startBtn').disabled = false;
-        }, function(error) {
-            addLog('❌ WebSocket 연결 실패: ' + error);
-            document.getElementById('connectionStatus').className = 'connection-status disconnected';
-            document.getElementById('connectionStatus').textContent = '🔴 WebSocket 연결 안 됨 - 서버를 실행하세요';
-            setTimeout(connect, 3000); // 3초 후 재연결 시도
+        // TPS Line Chart
+        tpsChart = new Chart(tpsCtx.getContext('2d'), {
+            type: 'line',
+            data: {
+                labels: timeLabels,
+                datasets: [{
+                    label: 'TPS',
+                    data: tpsData,
+                    borderColor: '#667eea',
+                    backgroundColor: 'rgba(102, 126, 234, 0.1)',
+                    borderWidth: 2,
+                    tension: 0.4,
+                    fill: true,
+                    pointRadius: 3,
+                    pointHoverRadius: 5
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    title: {
+                        display: true,
+                        text: 'TPS Over Time',
+                        font: { size: 14, weight: '600' }
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        ticks: { font: { size: 11 } },
+                        grid: { color: '#f1f5f9' }
+                    },
+                    x: {
+                        ticks: { font: { size: 11 } },
+                        grid: { display: false }
+                    }
+                }
+            }
+        });
+
+        // Status Doughnut Chart
+        statusChart = new Chart(statusCtx.getContext('2d'), {
+            type: 'doughnut',
+            data: {
+                labels: ['Success', 'Failed'],
+                datasets: [{
+                    data: [0, 0],
+                    backgroundColor: ['#10b981', '#ef4444'],
+                    borderWidth: 0
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: 'bottom',
+                        labels: { font: { size: 12 }, padding: 15 }
+                    },
+                    title: {
+                        display: true,
+                        text: 'Success vs Failure',
+                        font: { size: 14, weight: '600' }
+                    }
+                }
+            }
         });
     }
 
-    // 테스트 시작
+    // WebSocket Connection
+    function connect() {
+        const socket = new SockJS('http://localhost:8080/ws');
+        stompClient = Stomp.over(socket);
+        stompClient.debug = null;
+
+        stompClient.connect({}, function() {
+            addLog('✓ Connected to server', 'success');
+            document.getElementById('connectionStatus').className = 'connection-badge connected';
+            document.getElementById('connectionStatus').innerHTML = '<div class="status-dot"></div><span>Connected</span>';
+            document.getElementById('startBtn').disabled = false;
+        }, function() {
+            addLog('✗ Connection failed. Retrying...', 'error');
+            setTimeout(connect, 3000);
+        });
+    }
+
+    // Start Test
     async function startTest() {
         const config = {
             url: document.getElementById('apiUrl').value,
             threadType: document.getElementById('threadType').value,
             virtualThreads: parseInt(document.getElementById('virtualThreads').value),
-            requestsPerThread: parseInt(document.getElementById('requestsPerThread').value)
+            requestsPerThread: parseInt(document.getElementById('requestsPerThread').value),
+            method: document.getElementById('httpMethod').value
         };
 
         document.getElementById('startBtn').disabled = true;
-        document.getElementById('startBtn').textContent = '테스트 실행 중...';
-        document.getElementById('monitoringPanel').style.display = 'block';
+        document.getElementById('startBtn').innerHTML = '<span>⏳</span><span>Running...</span>';
+        document.getElementById('monitoringSection').style.display = 'block';
 
-        addLog(' 테스트 시작: ' + JSON.stringify(config));
+        tpsData = [];
+        timeLabels = [];
+        if (tpsChart) tpsChart.destroy();
+        if (statusChart) statusChart.destroy();
+        initCharts();
+
+        addLog(`→ Starting load test with ${config.virtualThreads} threads`, 'info');
 
         try {
             const response = await fetch('http://localhost:8080/api/tests/execute', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(config)
             });
-
-            if (!response.ok) {
-                throw new Error('서버 응답 오류: ' + response.status);
-            }
 
             const result = await response.json();
             currentTestId = result.testId;
 
-            addLog(' 테스트 ID: ' + currentTestId);
-            addLog(' 구독 경로: /topic/metrics/' + currentTestId);
-
-            // WebSocket 구독
+            addLog(`→ Test ID: ${currentTestId}`, 'success');
             subscribeToMetrics(currentTestId);
 
         } catch (error) {
-            addLog('❌ 테스트 시작 실패: ' + error);
-            alert('테스트 시작 실패!\n\n1. 서버가 실행 중인지 확인하세요\n2. URL이 올바른지 확인하세요\n\n' + error);
+            addLog(`✗ Test failed: ${error.message}`, 'error');
             document.getElementById('startBtn').disabled = false;
-            document.getElementById('startBtn').textContent = '테스트 시작';
+            document.getElementById('startBtn').innerHTML = '<span>▶️</span><span>Run Test</span>';
         }
     }
 
-    // 메트릭 구독
     function subscribeToMetrics(testId) {
-        // 실시간 메트릭 구독
         stompClient.subscribe('/topic/metrics/' + testId, function(message) {
-            const metric = JSON.parse(message.body);
-            updateMetrics(metric);
+            updateMetrics(JSON.parse(message.body));
         });
 
-        // 완료 메시지 구독
         stompClient.subscribe('/topic/test-complete/' + testId, function(message) {
-            const result = JSON.parse(message.body);
-            onTestComplete(result);
+            onTestComplete(JSON.parse(message.body));
         });
-
-        addLog('✅ WebSocket 구독 완료');
     }
 
-    // 메트릭 업데이트
     function updateMetrics(metric) {
         const progress = metric.progress.toFixed(1);
+        const successRate = metric.completedRequests > 0
+            ? ((metric.successCount / metric.completedRequests) * 100).toFixed(1)
+            : 0;
+
+        // Update stats
+        document.getElementById('progressValue').textContent = progress + '%';
+        document.getElementById('successRate').textContent = successRate + '%';
+        document.getElementById('tpsValue').textContent = metric.currentTps.toFixed(0);
+
+        // Update progress bar
         document.getElementById('progressBar').style.width = progress + '%';
-        document.getElementById('progressBar').textContent = progress + '%';
+        document.getElementById('progressPercent').textContent = progress + '%';
+        document.getElementById('progressText').textContent =
+            `${metric.completedRequests.toLocaleString()} / ${metric.totalRequests.toLocaleString()}`;
 
-        document.getElementById('progressText').textContent = progress + '%';
-        document.getElementById('requestsText').textContent =
-            metric.completedRequests.toLocaleString() + ' / ' + metric.totalRequests.toLocaleString();
-        document.getElementById('successText').textContent = metric.successCount.toLocaleString();
-        document.getElementById('failText').textContent = metric.failCount.toLocaleString();
-        document.getElementById('tpsText').textContent = metric.currentTps.toFixed(1);
-        document.getElementById('elapsedText').textContent =
-            (metric.elapsedTimeMs / 1000).toFixed(1) + 's';
+        // Status badge
+        document.getElementById('statusBadge').innerHTML =
+            metric.status === 'RUNNING'
+                ? '<span class="badge running">⏳ Running</span>'
+                : '<span class="badge completed">✓ Completed</span>';
 
-        const statusHtml = metric.status === 'RUNNING'
-            ? '<span class="status status-running">🔄 실행 중</span>'
-            : '<span class="status status-completed">✅ 완료</span>';
-        document.getElementById('statusBadge').innerHTML = statusHtml;
+        // Update charts
+        const elapsed = (metric.elapsedTimeMs / 1000).toFixed(0);
+        if (timeLabels.length === 0 || timeLabels[timeLabels.length - 1] !== elapsed + 's') {
+            timeLabels.push(elapsed + 's');
+            tpsData.push(metric.currentTps);
 
-        // 로그는 20%마다만 출력 (너무 많은 로그 방지)
-        if (metric.completedRequests % Math.max(1, Math.floor(metric.totalRequests / 5)) === 0) {
-            addLog(`📊 진행률 ${progress}% | 성공: ${metric.successCount} | 실패: ${metric.failCount} | TPS: ${metric.currentTps.toFixed(1)}`);
+            if (timeLabels.length > 30) {
+                timeLabels.shift();
+                tpsData.shift();
+            }
+
+            if (tpsChart) tpsChart.update('none');
         }
+
+        if (statusChart) {
+            statusChart.data.datasets[0].data = [metric.successCount, metric.failCount];
+            statusChart.update('none');
+        }
+
+        addLog(`${metric.completedRequests}/${metric.totalRequests} | ✓ ${metric.successCount} | ✗ ${metric.failCount} | ${metric.currentTps.toFixed(0)} TPS`, 'info');
     }
 
-    // 테스트 완료
     function onTestComplete(result) {
-        addLog('🎉 테스트 완료!');
-        addLog('📈 총 요청: ' + result.totalRequests.toLocaleString());
-        addLog('✅ 성공: ' + result.successCount.toLocaleString());
-        addLog('❌ 실패: ' + result.failCount.toLocaleString());
-        addLog('⚡ TPS: ' + result.tps.toFixed(2));
-        addLog('⏱️ 평균 응답시간: ' + result.avgResponseTimeMs + 'ms');
-        addLog('💾 실행 ID: ' + result.executionId);
+        addLog(`✓ Test completed successfully`, 'success');
+        addLog(`→ Total: ${result.totalRequests.toLocaleString()} | Success: ${result.successCount.toLocaleString()} | TPS: ${result.tps.toFixed(2)}`, 'success');
 
         document.getElementById('startBtn').disabled = false;
-        document.getElementById('startBtn').textContent = '테스트 시작';
-
-        const successRate = result.successRate.toFixed(2);
-        const message = `테스트 완료!\n\n` +
-            `총 요청: ${result.totalRequests.toLocaleString()}건\n` +
-            `성공률: ${successRate}%\n` +
-            `TPS: ${result.tps.toFixed(2)}\n` +
-            `평균 응답: ${result.avgResponseTimeMs}ms\n\n` +
-            `실행 ID: ${result.executionId}`;
-        alert(message);
+        document.getElementById('startBtn').innerHTML = '<span>▶️</span><span>Run Test</span>';
     }
 
-    // 로그 추가
-    function addLog(message) {
-        const logPanel = document.getElementById('logPanel');
-        const timestamp = new Date().toLocaleTimeString();
-        const entry = document.createElement('div');
-        entry.className = 'log-entry';
-        entry.textContent = `[${timestamp}] ${message}`;
-        logPanel.appendChild(entry);
-        logPanel.scrollTop = logPanel.scrollHeight;
+    function addLog(message, type = 'info') {
+        const terminal = document.getElementById('logTerminal');
+        const time = new Date().toLocaleTimeString('ko-KR');
+        const line = document.createElement('div');
+        line.className = 'log-line ' + type;
+        line.textContent = `[${time}] ${message}`;
+        terminal.appendChild(line);
+        terminal.scrollTop = terminal.scrollHeight;
 
-        // 로그가 100개 넘으면 오래된 것 삭제
-        if (logPanel.children.length > 100) {
-            logPanel.removeChild(logPanel.firstChild);
+        if (terminal.children.length > 100) {
+            terminal.removeChild(terminal.firstChild);
         }
     }
 
-    // 페이지 로드 시 WebSocket 연결
     window.onload = function() {
-        addLog('🌐 페이지 로드 완료');
-        addLog('🔌 WebSocket 연결 시도 중...');
-        document.getElementById('startBtn').disabled = true; // 연결될 때까지 비활성화
+        addLog('→ Initializing API Load Test Service...', 'info');
+        document.getElementById('startBtn').disabled = true;
         connect();
+        initCharts();
     };
 </script>
 </body>
