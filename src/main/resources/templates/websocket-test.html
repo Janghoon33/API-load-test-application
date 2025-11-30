@@ -23,7 +23,6 @@
             overflow: hidden;
         }
 
-        /* Layout */
         .layout {
             display: flex;
             height: 100vh;
@@ -128,12 +127,6 @@
             box-shadow: 0 1px 3px rgba(0,0,0,0.05);
         }
 
-        .top-bar-left {
-            display: flex;
-            align-items: center;
-            gap: 16px;
-        }
-
         .page-title {
             font-size: 18px;
             font-weight: 600;
@@ -172,6 +165,14 @@
             flex: 1;
             overflow-y: auto;
             padding: 24px;
+        }
+
+        .page-section {
+            display: none;
+        }
+
+        .page-section.active {
+            display: block;
         }
 
         /* Card */
@@ -270,50 +271,54 @@
             cursor: not-allowed;
         }
 
-        .btn-group {
-            display: flex;
-            gap: 12px;
-        }
-
         /* Stats Grid */
         .stats-grid {
             display: grid;
-            grid-template-columns: repeat(3, 1fr);
+            grid-template-columns: repeat(4, 1fr);
             gap: 16px;
             margin-bottom: 20px;
         }
 
         .stat-card {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
+            background: white;
+            border: 1px solid #e2e8f0;
             padding: 20px;
-            border-radius: 10px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            border-radius: 12px;
+            transition: all 0.2s;
         }
 
-        .stat-card.success {
-            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+        .stat-card:hover {
+            box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+            transform: translateY(-2px);
         }
 
-        .stat-card.danger {
-            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+        .stat-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
         }
 
         .stat-label {
             font-size: 13px;
-            opacity: 0.9;
-            margin-bottom: 8px;
-        }
-
-        .stat-value {
-            font-size: 32px;
-            font-weight: 700;
+            color: #718096;
+            font-weight: 500;
         }
 
         .stat-icon {
             font-size: 24px;
-            opacity: 0.8;
-            margin-bottom: 8px;
+        }
+
+        .stat-value {
+            font-size: 28px;
+            font-weight: 700;
+            color: #1a202c;
+        }
+
+        .stat-change {
+            font-size: 12px;
+            color: #10b981;
+            margin-top: 4px;
         }
 
         /* Progress */
@@ -344,7 +349,6 @@
             background: #e2e8f0;
             border-radius: 8px;
             overflow: hidden;
-            position: relative;
         }
 
         .progress-bar-fill {
@@ -372,34 +376,62 @@
             height: 300px;
         }
 
-        /* Tabs */
-        .tabs {
-            display: flex;
-            gap: 2px;
+        /* Table */
+        .table-container {
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th {
+            background: #f8fafc;
+            padding: 12px;
+            text-align: left;
+            font-size: 13px;
+            font-weight: 600;
+            color: #4a5568;
             border-bottom: 2px solid #e2e8f0;
-            margin-bottom: 20px;
         }
 
-        .tab {
-            padding: 12px 20px;
+        td {
+            padding: 12px;
             font-size: 14px;
-            font-weight: 500;
-            color: #718096;
-            background: transparent;
-            border: none;
-            cursor: pointer;
-            border-bottom: 2px solid transparent;
-            margin-bottom: -2px;
-            transition: all 0.2s;
+            border-bottom: 1px solid #e2e8f0;
         }
 
-        .tab:hover {
-            color: #667eea;
+        tr:hover {
+            background: #f8fafc;
         }
 
-        .tab.active {
-            color: #667eea;
-            border-bottom-color: #667eea;
+        .badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .badge.success {
+            background: #d1fae5;
+            color: #065f46;
+        }
+
+        .badge.warning {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .badge.virtual {
+            background: #ddd6fe;
+            color: #5b21b6;
+        }
+
+        .badge.platform {
+            background: #e0e7ff;
+            color: #3730a3;
         }
 
         /* Log Terminal */
@@ -424,66 +456,26 @@
         .log-line.error { color: #f87171; }
         .log-line.warning { color: #fbbf24; }
 
-        /* Badge */
-        .badge {
-            display: inline-flex;
-            align-items: center;
-            padding: 4px 10px;
-            border-radius: 12px;
-            font-size: 12px;
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #718096;
+        }
+
+        .empty-state-icon {
+            font-size: 64px;
+            margin-bottom: 16px;
+        }
+
+        .empty-state-title {
+            font-size: 18px;
             font-weight: 600;
+            margin-bottom: 8px;
+            color: #2d3748;
         }
 
-        .badge.running {
-            background: #fef3c7;
-            color: #92400e;
-        }
-
-        .badge.completed {
-            background: #d1fae5;
-            color: #065f46;
-        }
-
-        /* Scrollbar */
-        ::-webkit-scrollbar {
-            width: 8px;
-            height: 8px;
-        }
-
-        ::-webkit-scrollbar-track {
-            background: #f1f5f9;
-        }
-
-        ::-webkit-scrollbar-thumb {
-            background: #cbd5e0;
-            border-radius: 4px;
-        }
-
-        ::-webkit-scrollbar-thumb:hover {
-            background: #a0aec0;
-        }
-
-        /* Responsive */
-        @media (max-width: 1024px) {
-            .sidebar {
-                width: 70px;
-            }
-
-            .nav-item span {
-                display: none;
-            }
-
-            .logo span {
-                display: none;
-            }
-
-            .stats-grid {
-                grid-template-columns: repeat(2, 1fr);
-            }
-
-            .charts-container {
-                grid-template-columns: 1fr;
-            }
+        .empty-state-text {
+            font-size: 14px;
         }
     </style>
 </head>
@@ -501,29 +493,17 @@
         <div class="nav-menu">
             <div class="nav-section">
                 <div class="nav-section-title">Main</div>
-                <div class="nav-item active">
+                <div class="nav-item" onclick="switchPage('loadtest')">
                     <span class="nav-icon">🎯</span>
                     <span>Load Test</span>
                 </div>
-                <div class="nav-item">
+                <div class="nav-item" onclick="switchPage('dashboard')">
                     <span class="nav-icon">📊</span>
                     <span>Dashboard</span>
                 </div>
-                <div class="nav-item">
+                <div class="nav-item" onclick="switchPage('history')">
                     <span class="nav-icon">📁</span>
                     <span>History</span>
-                </div>
-            </div>
-
-            <div class="nav-section">
-                <div class="nav-section-title">Settings</div>
-                <div class="nav-item">
-                    <span class="nav-icon">⚙️</span>
-                    <span>Settings</span>
-                </div>
-                <div class="nav-item">
-                    <span class="nav-icon">📖</span>
-                    <span>Docs</span>
                 </div>
             </div>
         </div>
@@ -533,9 +513,7 @@
     <div class="main-content">
         <!-- Top Bar -->
         <div class="top-bar">
-            <div class="top-bar-left">
-                <div class="page-title">API Load Test Service</div>
-            </div>
+            <div class="page-title" id="pageTitle">API Load Test Service</div>
             <div id="connectionStatus" class="connection-badge disconnected">
                 <div class="status-dot"></div>
                 <span>Disconnected</span>
@@ -544,128 +522,196 @@
 
         <!-- Content Area -->
         <div class="content-area">
-            <!-- Test Configuration Card -->
-            <div class="card">
-                <div class="card-header">
-                    <div class="card-title">🔧 Test Configuration</div>
-                </div>
-                <div class="card-body">
-                    <div class="form-row">
-                        <div class="form-group full-width">
-                            <label>API Endpoint</label>
-                            <input type="text" id="apiUrl" value="https://jsonplaceholder.typicode.com/posts/1" placeholder="Enter API endpoint">
-                        </div>
+            <!-- Load Test Page -->
+            <div id="loadtestPage" class="page-section active">
+                <!-- Test Configuration -->
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">🔧 Test Configuration</div>
                     </div>
-
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Thread Type</label>
-                            <select id="threadType">
-                                <option value="VIRTUAL">Virtual Threads</option>
-                                <option value="PLATFORM">Platform Threads</option>
-                            </select>
+                    <div class="card-body">
+                        <div class="form-row">
+                            <div class="form-group full-width">
+                                <label>API Endpoint</label>
+                                <input type="text" id="apiUrl" value="https://jsonplaceholder.typicode.com/posts/1" placeholder="Enter API endpoint">
+                            </div>
                         </div>
 
-                        <div class="form-group">
-                            <label>HTTP Method</label>
-                            <select id="httpMethod">
-                                <option value="GET">GET</option>
-                                <option value="POST">POST</option>
-                                <option value="PUT">PUT</option>
-                                <option value="DELETE">DELETE</option>
-                            </select>
-                        </div>
-                    </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Thread Type</label>
+                                <select id="threadType">
+                                    <option value="VIRTUAL">Virtual Threads</option>
+                                    <option value="PLATFORM">Platform Threads</option>
+                                </select>
+                            </div>
 
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Virtual Threads</label>
-                            <input type="number" id="virtualThreads" value="1000" min="1">
+                            <div class="form-group">
+                                <label>HTTP Method</label>
+                                <select id="httpMethod">
+                                    <option value="GET">GET</option>
+                                    <option value="POST">POST</option>
+                                    <option value="PUT">PUT</option>
+                                    <option value="DELETE">DELETE</option>
+                                </select>
+                            </div>
                         </div>
 
-                        <div class="form-group">
-                            <label>Requests per Thread</label>
-                            <input type="number" id="requestsPerThread" value="10" min="1">
-                        </div>
-                    </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Virtual Threads</label>
+                                <input type="number" id="virtualThreads" value="1000" min="1">
+                            </div>
 
-                    <div class="btn-group">
+                            <div class="form-group">
+                                <label>Requests per Thread</label>
+                                <input type="number" id="requestsPerThread" value="10" min="1">
+                            </div>
+                        </div>
+
                         <button class="btn btn-primary" id="startBtn" onclick="startTest()">
                             <span>▶️</span>
                             <span>Run Test</span>
                         </button>
                     </div>
                 </div>
-            </div>
 
-            <!-- Real-time Monitoring -->
-            <div id="monitoringSection" style="display: none;">
-                <!-- Stats Grid -->
-                <div class="stats-grid">
-                    <div class="stat-card">
-                        <div class="stat-icon">📊</div>
-                        <div class="stat-label">Progress</div>
-                        <div class="stat-value" id="progressValue">0%</div>
-                    </div>
-
-                    <div class="stat-card success">
-                        <div class="stat-icon">✅</div>
-                        <div class="stat-label">Success Rate</div>
-                        <div class="stat-value" id="successRate">0%</div>
-                    </div>
-
-                    <div class="stat-card">
-                        <div class="stat-icon">⚡</div>
-                        <div class="stat-label">Current TPS</div>
-                        <div class="stat-value" id="tpsValue">0</div>
-                    </div>
-                </div>
-
-                <!-- Progress Bar -->
-                <div class="card">
-                    <div class="card-body">
-                        <div class="progress-section">
-                            <div class="progress-header">
-                                <div class="progress-title">
-                                    <span id="statusBadge"></span>
-                                    Test Progress
-                                </div>
-                                <div class="progress-percent" id="progressPercent">0%</div>
+                <!-- Monitoring -->
+                <div id="monitoringSection" style="display: none;">
+                    <div class="stats-grid">
+                        <div class="stat-card">
+                            <div class="stat-header">
+                                <span class="stat-label">Progress</span>
+                                <span class="stat-icon">📈</span>
                             </div>
-                            <div class="progress-bar-container">
-                                <div class="progress-bar-fill" id="progressBar" style="width: 0%">
-                                    <span id="progressText">0 / 0</span>
+                            <div class="stat-value" id="progressValue">0%</div>
+                        </div>
+
+                        <div class="stat-card">
+                            <div class="stat-header">
+                                <span class="stat-label">Success</span>
+                                <span class="stat-icon">✅</span>
+                            </div>
+                            <div class="stat-value" id="successValue">0</div>
+                        </div>
+
+                        <div class="stat-card">
+                            <div class="stat-header">
+                                <span class="stat-label">Failed</span>
+                                <span class="stat-icon">❌</span>
+                            </div>
+                            <div class="stat-value" id="failedValue">0</div>
+                        </div>
+
+                        <div class="stat-card">
+                            <div class="stat-header">
+                                <span class="stat-label">Current TPS</span>
+                                <span class="stat-icon">⚡</span>
+                            </div>
+                            <div class="stat-value" id="tpsValue">0</div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-body">
+                            <div class="progress-section">
+                                <div class="progress-header">
+                                    <div class="progress-title">
+                                        <span id="statusBadge"></span>
+                                    </div>
+                                    <div class="progress-percent" id="progressPercent">0%</div>
+                                </div>
+                                <div class="progress-bar-container">
+                                    <div class="progress-bar-fill" id="progressBar" style="width: 0%">
+                                        <span id="progressText">0 / 0</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <div class="card-title">📈 Performance Metrics</div>
+                        </div>
+                        <div class="card-body">
+                            <div class="charts-container">
+                                <div class="chart-wrapper">
+                                    <canvas id="tpsChart"></canvas>
+                                </div>
+                                <div class="chart-wrapper">
+                                    <canvas id="statusChart"></canvas>
                                 </div>
                             </div>
                         </div>
                     </div>
                 </div>
 
-                <!-- Charts -->
                 <div class="card">
                     <div class="card-header">
-                        <div class="card-title">📈 Performance Metrics</div>
+                        <div class="card-title">📝 Logs</div>
                     </div>
                     <div class="card-body">
-                        <div class="charts-container">
-                            <div class="chart-wrapper">
-                                <canvas id="tpsChart"></canvas>
-                            </div>
-                            <div class="chart-wrapper">
-                                <canvas id="statusChart"></canvas>
-                            </div>
-                        </div>
+                        <div class="log-terminal" id="logTerminal"></div>
                     </div>
                 </div>
             </div>
 
-            <!-- Logs -->
-            <div class="card">
-                <div class="card-header">
-                    <div class="card-title">📝 Logs</div>
+            <!-- Dashboard Page -->
+            <div id="dashboardPage" class="page-section">
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-header">
+                            <span class="stat-label">Total Tests</span>
+                            <span class="stat-icon">🎯</span>
+                        </div>
+                        <div class="stat-value" id="dashTotalTests">0</div>
+                    </div>
+
+                    <div class="stat-card">
+                        <div class="stat-header">
+                            <span class="stat-label">Total Requests</span>
+                            <span class="stat-icon">📦</span>
+                        </div>
+                        <div class="stat-value" id="dashTotalRequests">0</div>
+                    </div>
+
+                    <div class="stat-card">
+                        <div class="stat-header">
+                            <span class="stat-label">Avg TPS</span>
+                            <span class="stat-icon">⚡</span>
+                        </div>
+                        <div class="stat-value" id="dashAvgTps">0</div>
+                    </div>
+
+                    <div class="stat-card">
+                        <div class="stat-header">
+                            <span class="stat-label">Success Rate</span>
+                            <span class="stat-icon">✅</span>
+                        </div>
+                        <div class="stat-value" id="dashSuccessRate">0%</div>
+                    </div>
                 </div>
-                <div class="card-body">
-                    <div class="log-terminal" id="logTerminal"></div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">📊 Recent Tests</div>
+                    </div>
+                    <div class="card-body">
+                        <div id="recentTestsContainer"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- History Page -->
+            <div id="historyPage" class="page-section">
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">📁 Test History</div>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-container" id="historyTableContainer"></div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -675,10 +721,146 @@
 <script>
     let stompClient = null;
     let currentTestId = null;
+    let currentPage = 'loadtest';
     let tpsChart = null;
     let statusChart = null;
     let tpsData = [];
     let timeLabels = [];
+
+    // Page Switching
+    function switchPage(page) {
+        currentPage = page;
+
+        document.querySelectorAll('.page-section').forEach(el => el.classList.remove('active'));
+        document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+
+        document.getElementById(page + 'Page').classList.add('active');
+        event.currentTarget.classList.add('active');
+
+        const titles = {
+            'loadtest': 'API Load Test Service',
+            'dashboard': 'Dashboard',
+            'history': 'Test History'
+        };
+        document.getElementById('pageTitle').textContent = titles[page];
+
+        if (page === 'dashboard') {
+            loadDashboard();
+        } else if (page === 'history') {
+            loadHistory();
+        }
+    }
+
+    // Load Dashboard
+    async function loadDashboard() {
+        try {
+            const response = await fetch('http://localhost:8080/api/stats/summary');
+            const data = await response.json();
+
+            document.getElementById('dashTotalTests').textContent = data.totalTests.toLocaleString();
+            document.getElementById('dashTotalRequests').textContent = data.totalRequests.toLocaleString();
+            document.getElementById('dashAvgTps').textContent = data.avgTps.toFixed(1);
+            document.getElementById('dashSuccessRate').textContent = data.successRate.toFixed(1) + '%';
+
+            const container = document.getElementById('recentTestsContainer');
+            if (data.recentTests.length === 0) {
+                container.innerHTML = `
+                        <div class="empty-state">
+                            <div class="empty-state-icon">📊</div>
+                            <div class="empty-state-title">No tests yet</div>
+                            <div class="empty-state-text">Run your first load test to see statistics here</div>
+                        </div>
+                    `;
+            } else {
+                container.innerHTML = `
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Type</th>
+                                    <th>Requests</th>
+                                    <th>Success</th>
+                                    <th>TPS</th>
+                                    <th>Date</th>
+                                </tr>
+                                </thead>
+                            <tbody>
+                                ${data.recentTests.map(test => `
+                                    <tr>
+                                        <td><strong>#${test.executionId}</strong></td>
+                                        <td><span class="badge ${test.threadType.toLowerCase()}">${test.threadType}</span></td>
+                                        <td>${test.totalRequests.toLocaleString()}</td>
+                                        <td><span class="badge success">${test.successCount.toLocaleString()}</span></td>
+                                        <td><strong>${test.tps.toFixed(2)}</strong></td>
+                                        <td>${new Date(test.startedAt).toLocaleString('ko-KR')}</td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                    `;
+            }
+        } catch (error) {
+            console.error('Failed to load dashboard:', error);
+            addLog('✗ Failed to load dashboard data', 'error');
+        }
+    }
+
+    // Load History
+    async function loadHistory() {
+        try {
+            const response = await fetch('http://localhost:8080/api/tests/results');
+            const tests = await response.json();
+
+            const container = document.getElementById('historyTableContainer');
+            if (tests.length === 0) {
+                container.innerHTML = `
+                        <div class="empty-state">
+                            <div class="empty-state-icon">📁</div>
+                            <div class="empty-state-title">No test history</div>
+                            <div class="empty-state-text">Your test results will appear here</div>
+                        </div>
+                    `;
+            } else {
+                container.innerHTML = `
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Thread Type</th>
+                                    <th>Threads</th>
+                                    <th>Total Requests</th>
+                                    <th>Success</th>
+                                    <th>Failed</th>
+                                    <th>TPS</th>
+                                    <th>Avg Response</th>
+                                    <th>Duration</th>
+                                    <th>Date</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${tests.map(test => `
+                                    <tr>
+                                        <td><strong>#${test.executionId}</strong></td>
+                                        <td><span class="badge ${test.threadType.toLowerCase()}">${test.threadType}</span></td>
+                                        <td>${test.totalRequests / test.requestsPerThread || '-'}</td>
+                                        <td>${test.totalRequests.toLocaleString()}</td>
+                                        <td><span class="badge success">${test.successCount.toLocaleString()}</span></td>
+                                        <td><span class="badge ${test.failCount > 0 ? 'warning' : 'success'}">${test.failCount}</span></td>
+                                        <td><strong>${test.tps.toFixed(2)}</strong></td>
+                                        <td>${test.avgResponseTimeMs}ms</td>
+                                        <td>${(test.totalDurationMs / 1000).toFixed(1)}s</td>
+                                        <td>${new Date(test.startedAt).toLocaleString('ko-KR', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                    `;
+            }
+        } catch (error) {
+            console.error('Failed to load history:', error);
+            addLog('✗ Failed to load history data', 'error');
+        }
+    }
 
     // Initialize Charts
     function initCharts() {
@@ -687,7 +869,9 @@
 
         if (!tpsCtx || !statusCtx) return;
 
-        // TPS Line Chart
+        if (tpsChart) tpsChart.destroy();
+        if (statusChart) statusChart.destroy();
+
         tpsChart = new Chart(tpsCtx.getContext('2d'), {
             type: 'line',
             data: {
@@ -729,7 +913,6 @@
             }
         });
 
-        // Status Doughnut Chart
         statusChart = new Chart(statusCtx.getContext('2d'), {
             type: 'doughnut',
             data: {
@@ -791,11 +974,9 @@
 
         tpsData = [];
         timeLabels = [];
-        if (tpsChart) tpsChart.destroy();
-        if (statusChart) statusChart.destroy();
         initCharts();
 
-        addLog(`→ Starting load test with ${config.virtualThreads} threads`, 'info');
+        addLog(`→ Starting test: ${config.virtualThreads} threads × ${config.requestsPerThread} requests`, 'info');
 
         try {
             const response = await fetch('http://localhost:8080/api/tests/execute', {
@@ -811,7 +992,7 @@
             subscribeToMetrics(currentTestId);
 
         } catch (error) {
-            addLog(`✗ Test failed: ${error.message}`, 'error');
+            addLog(`✗ Failed: ${error.message}`, 'error');
             document.getElementById('startBtn').disabled = false;
             document.getElementById('startBtn').innerHTML = '<span>▶️</span><span>Run Test</span>';
         }
@@ -829,28 +1010,22 @@
 
     function updateMetrics(metric) {
         const progress = metric.progress.toFixed(1);
-        const successRate = metric.completedRequests > 0
-            ? ((metric.successCount / metric.completedRequests) * 100).toFixed(1)
-            : 0;
 
-        // Update stats
         document.getElementById('progressValue').textContent = progress + '%';
-        document.getElementById('successRate').textContent = successRate + '%';
+        document.getElementById('successValue').textContent = metric.successCount.toLocaleString();
+        document.getElementById('failedValue').textContent = metric.failCount.toLocaleString();
         document.getElementById('tpsValue').textContent = metric.currentTps.toFixed(0);
 
-        // Update progress bar
         document.getElementById('progressBar').style.width = progress + '%';
         document.getElementById('progressPercent').textContent = progress + '%';
         document.getElementById('progressText').textContent =
             `${metric.completedRequests.toLocaleString()} / ${metric.totalRequests.toLocaleString()}`;
 
-        // Status badge
         document.getElementById('statusBadge').innerHTML =
             metric.status === 'RUNNING'
-                ? '<span class="badge running">⏳ Running</span>'
-                : '<span class="badge completed">✓ Completed</span>';
+                ? '<span class="badge warning">⏳ Running</span>'
+                : '<span class="badge success">✓ Completed</span>';
 
-        // Update charts
         const elapsed = (metric.elapsedTimeMs / 1000).toFixed(0);
         if (timeLabels.length === 0 || timeLabels[timeLabels.length - 1] !== elapsed + 's') {
             timeLabels.push(elapsed + 's');
@@ -869,12 +1044,11 @@
             statusChart.update('none');
         }
 
-        addLog(`${metric.completedRequests}/${metric.totalRequests} | ✓ ${metric.successCount} | ✗ ${metric.failCount} | ${metric.currentTps.toFixed(0)} TPS`, 'info');
+        addLog(`${metric.completedRequests}/${metric.totalRequests} | ${metric.currentTps.toFixed(0)} TPS`, 'info');
     }
 
     function onTestComplete(result) {
-        addLog(`✓ Test completed successfully`, 'success');
-        addLog(`→ Total: ${result.totalRequests.toLocaleString()} | Success: ${result.successCount.toLocaleString()} | TPS: ${result.tps.toFixed(2)}`, 'success');
+        addLog(`✓ Completed: ${result.totalRequests.toLocaleString()} requests | TPS: ${result.tps.toFixed(2)}`, 'success');
 
         document.getElementById('startBtn').disabled = false;
         document.getElementById('startBtn').innerHTML = '<span>▶️</span><span>Run Test</span>';
@@ -897,6 +1071,7 @@
     window.onload = function() {
         addLog('→ Initializing API Load Test Service...', 'info');
         document.getElementById('startBtn').disabled = true;
+        document.querySelectorAll('.nav-item')[0].classList.add('active');
         connect();
         initCharts();
     };
