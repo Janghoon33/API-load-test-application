@@ -39,3 +39,13 @@ TPS = 총 요청 수 / 총 소요 시간(초)
 <img width="1301" height="558" alt="image" src="https://github.com/user-attachments/assets/57da5442-7388-406a-9c50-b0edd6f0449e" />
 
 </br></br></br>
+
+
+------
+java 21 / spring boot 3.5.7
+gradle
+jpa
+DB : postgreSql
+html/css/javascript
+
+
