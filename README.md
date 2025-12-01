@@ -42,10 +42,10 @@ TPS = 총 요청 수 / 총 소요 시간(초)
 
 
 ------
-java 21 / spring boot 3.5.7
-gradle
-jpa
-DB : postgreSql
-html/css/javascript
+- java 21 / spring boot 4.0.0
+- gradle
+- jpa
+- postgreSql
+- html/css/javascript
 
 
