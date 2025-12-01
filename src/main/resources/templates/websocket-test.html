@@ -725,6 +725,7 @@
     let tpsChart = null;
     let statusChart = null;
     let tpsData = [];
+    let errorChart = null;
     let timeLabels = [];
 
     // Page Switching
@@ -972,6 +973,12 @@
         document.getElementById('startBtn').innerHTML = '<span>⏳</span><span>Running...</span>';
         document.getElementById('monitoringSection').style.display = 'block';
 
+        // ✅ 기존 에러 차트 제거
+        const existingErrorChart = document.getElementById('errorChartCard');
+        if (existingErrorChart) {
+            existingErrorChart.remove();
+        }
+
         tpsData = [];
         timeLabels = [];
         initCharts();
@@ -1049,6 +1056,21 @@
 
     function onTestComplete(result) {
         addLog(`✓ Completed: ${result.totalRequests.toLocaleString()} requests | TPS: ${result.tps.toFixed(2)}`, 'success');
+        addLog(`  ├─ Success: ${result.successCount.toLocaleString()} (${result.successRate.toFixed(1)}%)`, 'success');
+        addLog(`  └─ Failed: ${result.failCount.toLocaleString()}`, result.failCount > 0 ? 'error' : 'success');
+
+        // ✅ 에러가 있으면 breakdown 표시
+        if (result.failCount > 0 && result.errorBreakdown) {
+            showErrorBreakdown(result.errorBreakdown);
+
+            // 로그에도 상세 출력
+            addLog('', 'info');
+            addLog('📊 Error Breakdown:', 'warning');
+            Object.entries(result.errorBreakdown).forEach(([type, count]) => {
+                const percentage = ((count / result.failCount) * 100).toFixed(1);
+                addLog(`  ├─ ${type}: ${count}건 (${percentage}%)`, 'error');
+            });
+        }
 
         document.getElementById('startBtn').disabled = false;
         document.getElementById('startBtn').innerHTML = '<span>▶️</span><span>Run Test</span>';
@@ -1075,6 +1097,138 @@
         connect();
         initCharts();
     };
+
+    function showErrorBreakdown(errorBreakdown) {
+        if (!errorBreakdown || Object.keys(errorBreakdown).length === 0) {
+            return;
+        }
+
+        // 기존 에러 차트 제거
+        const existingErrorChart = document.getElementById('errorChartCard');
+        if (existingErrorChart) {
+            existingErrorChart.remove();
+        }
+
+        // 에러 레이블 한글화
+        const errorLabels = Object.keys(errorBreakdown);
+        const errorCounts = Object.values(errorBreakdown);
+
+        const errorDescriptions = {
+            'TIMEOUT': '⏱️ Timeout',
+            'CONNECTION_FAILED': '🔌 Connection Failed',
+            'CLIENT_ERROR_400': '❌ 400 Bad Request',
+            'CLIENT_ERROR_401': '🔒 401 Unauthorized',
+            'CLIENT_ERROR_403': '🚫 403 Forbidden',
+            'CLIENT_ERROR_404': '❓ 404 Not Found',
+            'CLIENT_ERROR_429': '🚦 429 Too Many Requests',
+            'SERVER_ERROR_500': '💥 500 Internal Server Error',
+            'SERVER_ERROR_502': '🌐 502 Bad Gateway',
+            'SERVER_ERROR_503': '⚠️ 503 Service Unavailable',
+            'SERVER_ERROR_504': '⏰ 504 Gateway Timeout',
+            'UNKNOWN': '❓ Unknown Error'
+        };
+
+        const translatedLabels = errorLabels.map(label => {
+            return errorDescriptions[label] || label;
+        });
+
+        // 에러 차트 HTML 생성
+        const errorChartHtml = `
+        <div class="card" id="errorChartCard">
+            <div class="card-header">
+                <div class="card-title">❌ Error Breakdown</div>
+            </div>
+            <div class="card-body">
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: start;">
+                    <!-- 차트 영역 -->
+                    <div style="height: 250px;">
+                        <canvas id="errorChart"></canvas>
+                    </div>
+
+                    <!-- 테이블 영역 -->
+                    <div>
+                        <table style="width: 100%;">
+                            <thead>
+                                <tr>
+                                    <th>Error Type</th>
+                                    <th style="text-align: right;">Count</th>
+                                    <th style="text-align: right;">Percentage</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${errorLabels.map((label, idx) => {
+                const percentage = ((errorCounts[idx] / errorCounts.reduce((a, b) => a + b, 0)) * 100).toFixed(1);
+                return `
+                                        <tr>
+                                            <td>${translatedLabels[idx]}</td>
+                                            <td style="text-align: right;"><strong>${errorCounts[idx].toLocaleString()}</strong></td>
+                                            <td style="text-align: right;"><span class="badge warning">${percentage}%</span></td>
+                                        </tr>
+                                    `;
+            }).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+
+        // 모니터링 섹션 끝에 추가
+        document.getElementById('monitoringSection').insertAdjacentHTML('beforeend', errorChartHtml);
+
+        // 차트 생성
+        const errorCtx = document.getElementById('errorChart').getContext('2d');
+        errorChart = new Chart(errorCtx, {
+            type: 'bar',
+            data: {
+                labels: translatedLabels,
+                datasets: [{
+                    label: 'Error Count',
+                    data: errorCounts,
+                    backgroundColor: [
+                        '#ef4444',
+                        '#f97316',
+                        '#f59e0b',
+                        '#eab308',
+                        '#84cc16',
+                        '#22c55e',
+                        '#10b981',
+                        '#14b8a6'
+                    ],
+                    borderWidth: 0,
+                    borderRadius: 6
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    title: {
+                        display: true,
+                        text: 'Error Distribution',
+                        font: { size: 14, weight: '600' }
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        ticks: {
+                            stepSize: 1,
+                            font: { size: 11 }
+                        },
+                        grid: { color: '#f1f5f9' }
+                    },
+                    x: {
+                        ticks: { font: { size: 11 } },
+                        grid: { display: false }
+                    }
+                }
+            }
+        });
+    }
+
 </script>
 </body>
 </html>

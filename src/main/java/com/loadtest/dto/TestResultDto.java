@@ -6,6 +6,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.LocalDateTime;
+import java.util.Map;
 
 @Data
 @Builder
@@ -32,6 +33,8 @@ public class TestResultDto {
     private long totalDurationMs;
 
     private double tps; // Transactions Per Second
+
+    private Map<String, Integer> errorBreakdown; // 에러 타입별 카운트
 
     private LocalDateTime startedAt;
 

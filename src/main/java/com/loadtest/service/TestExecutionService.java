@@ -15,14 +15,17 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -33,6 +36,7 @@ public class TestExecutionService {
     private final HttpClient httpClient;
     private final TestExecutionRepository executionRepository;
     private final SimpMessagingTemplate messagingTemplate;
+    private final ConcurrentHashMap<String, AtomicInteger> errorBreakdown = new ConcurrentHashMap<>();
 
     public TestExecutionService(
             @Qualifier("virtualThreadExecutor") ExecutorService virtualExecutor,
@@ -51,6 +55,7 @@ public class TestExecutionService {
      * 부하 테스트 실행
      */
     public TestResultDto executeTest(TestConfigDto config) {
+        errorBreakdown.clear();
         return executeTestWithId(generateTestId(), config);
     }
 
@@ -94,10 +99,10 @@ public class TestExecutionService {
                             successCount, failCount, completedCount, totalResponseTime,
                             minResponseTime, maxResponseTime);
 
-                    // 실시간 메트릭 전송 (자주!)
+                    // 실시간 메트릭 전송
                     int completed = completedCount.get();
 
-                    // 100개마다 또는 완료 시 전송 (기존: 10개)
+                    // 100개마다 또는 완료 시 전송
                     if (completed % 100 == 0 || completed == totalRequests) {
                         sendRealtimeMetric(testId, totalRequests, completed,
                                 successCount.get(), failCount.get(), startMillis, "RUNNING");
@@ -154,7 +159,7 @@ public class TestExecutionService {
                 .failCount(fail)
                 .progress(progress)
                 .currentTps(currentTps)
-                .avgResponseTimeMs(0) // 필요시 계산 추가
+                .avgResponseTimeMs(0)
                 .elapsedTimeMs(elapsed)
                 .timestamp(now)
                 .status(status)
@@ -208,7 +213,9 @@ public class TestExecutionService {
                 config.getHeaders().forEach(requestBuilder::header);
             }
 
-            HttpRequest request = requestBuilder.build();
+            HttpRequest request = requestBuilder
+                    .timeout(Duration.ofSeconds(10))
+                    .build();
 
             // 동기 요청 (가상 스레드에서는 블로킹 시 자동 양보)
             HttpResponse<String> response = httpClient.send(request,
@@ -226,15 +233,43 @@ public class TestExecutionService {
                 successCount.incrementAndGet();
             } else {
                 failCount.incrementAndGet();
-                log.warn("Thread-{} Request-{} 실패: Status {}",
-                        threadId, requestId, response.statusCode());
+                // HTTP 에러 분류
+                String errorType = classifyHttpError(response.statusCode());
+                errorBreakdown.computeIfAbsent(errorType, k -> new AtomicInteger()).incrementAndGet();
+                log.warn("Thread-{} Request-{} HTTP Error: {} - {}",
+                        threadId, requestId, response.statusCode(), errorType);
             }
+
+        } catch (java.net.http.HttpTimeoutException e) {
+            failCount.incrementAndGet();
+            completedCount.incrementAndGet();
+            errorBreakdown.computeIfAbsent("TIMEOUT", k -> new AtomicInteger()).incrementAndGet();
+            log.error("Thread-{} Request-{} Timeout", threadId, requestId);
+
+        } catch (java.net.ConnectException e) {
+            failCount.incrementAndGet();
+            completedCount.incrementAndGet();
+            errorBreakdown.computeIfAbsent("CONNECTION_FAILED", k -> new AtomicInteger()).incrementAndGet();
+            log.error("Thread-{} Request-{} Connection Failed", threadId, requestId);
 
         } catch (Exception e) {
             failCount.incrementAndGet();
             completedCount.incrementAndGet();
-            log.error("Thread-{} Request-{} 오류: {}", threadId, requestId, e.getMessage());
+            errorBreakdown.computeIfAbsent("UNKNOWN", k -> new AtomicInteger()).incrementAndGet();
+            log.error("Thread-{} Request-{} Error: {}", threadId, requestId, e.getMessage());
         }
+    }
+
+    /**
+     * HTTP 에러 분류
+     */
+    private String classifyHttpError(int statusCode) {
+        if (statusCode >= 400 && statusCode < 500) {
+            return "CLIENT_ERROR_" + statusCode;
+        } else if (statusCode >= 500) {
+            return "SERVER_ERROR_" + statusCode;
+        }
+        return "HTTP_ERROR_" + statusCode;
     }
 
     /**
@@ -269,6 +304,13 @@ public class TestExecutionService {
         int totalRequests = success + fail;
         long duration = endMillis - startMillis;
 
+        // 에러 breakdown 변환
+        Map<String, Integer> errorMap = errorBreakdown.entrySet().stream()
+                .collect(Collectors.toMap(
+                        Map.Entry::getKey,
+                        e -> e.getValue().get()
+                ));
+
         return TestResultDto.builder()
                 .threadType(config.getThreadType().name())
                 .totalRequests(totalRequests)
@@ -279,6 +321,7 @@ public class TestExecutionService {
                 .maxResponseTimeMs(maxRespTime)
                 .totalDurationMs(duration)
                 .tps(duration > 0 ? (totalRequests * 1000.0) / duration : 0)
+                .errorBreakdown(errorMap)
                 .startedAt(startTime)
                 .completedAt(endTime)
                 .build();
@@ -328,6 +371,9 @@ public class TestExecutionService {
         return toDto(execution);
     }
 
+    /**
+     * Entity를 DTO로 변환
+     */
     private TestResultDto toDto(TestExecution entity) {
         return TestResultDto.builder()
                 .executionId(entity.getId())
