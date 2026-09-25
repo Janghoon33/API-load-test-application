@@ -36,7 +36,6 @@ public class TestExecutionService {
     private final HttpClient httpClient;
     private final TestExecutionRepository executionRepository;
     private final SimpMessagingTemplate messagingTemplate;
-    private final ConcurrentHashMap<String, AtomicInteger> errorBreakdown = new ConcurrentHashMap<>();
 
     public TestExecutionService(
             @Qualifier("virtualThreadExecutor") ExecutorService virtualExecutor,
@@ -55,7 +54,6 @@ public class TestExecutionService {
      * 부하 테스트 실행
      */
     public TestResultDto executeTest(TestConfigDto config) {
-        errorBreakdown.clear();
         return executeTestWithId(generateTestId(), config);
     }
 
@@ -80,6 +78,8 @@ public class TestExecutionService {
         AtomicLong totalResponseTime = new AtomicLong(0);
         AtomicLong minResponseTime = new AtomicLong(Long.MAX_VALUE);
         AtomicLong maxResponseTime = new AtomicLong(0);
+        // 실행별 에러 집계 (서비스 필드로 두면 실행 간에 누적·오염된다)
+        ConcurrentHashMap<String, AtomicInteger> errorBreakdown = new ConcurrentHashMap<>();
 
         int totalRequests = config.getVirtualThreads() * config.getRequestsPerThread();
 
@@ -97,7 +97,7 @@ public class TestExecutionService {
                 for (int j = 0; j < config.getRequestsPerThread(); j++) {
                     executeRequest(config, threadId, j,
                             successCount, failCount, completedCount, totalResponseTime,
-                            minResponseTime, maxResponseTime);
+                            minResponseTime, maxResponseTime, errorBreakdown);
 
                     // 실시간 메트릭 전송
                     int completed = completedCount.get();
@@ -122,7 +122,7 @@ public class TestExecutionService {
         // 최종 결과 계산
         TestResultDto result = buildResult(config, successCount.get(), failCount.get(),
                 totalResponseTime.get(), minResponseTime.get(), maxResponseTime.get(),
-                startTime, endTime, startMillis, endMillis);
+                errorBreakdown, startTime, endTime, startMillis, endMillis);
 
         // DB에 저장하고 ID 받아오기
         Long executionId = saveExecution(config, result, startTime, endTime);
@@ -182,7 +182,8 @@ public class TestExecutionService {
     private void executeRequest(TestConfigDto config, int threadId, int requestId,
                                 AtomicInteger successCount, AtomicInteger failCount,
                                 AtomicInteger completedCount, AtomicLong totalResponseTime,
-                                AtomicLong minResponseTime, AtomicLong maxResponseTime) {
+                                AtomicLong minResponseTime, AtomicLong maxResponseTime,
+                                ConcurrentHashMap<String, AtomicInteger> errorBreakdown) {
         try {
             long reqStart = System.currentTimeMillis();
 
@@ -299,6 +300,7 @@ public class TestExecutionService {
      */
     private TestResultDto buildResult(TestConfigDto config, int success, int fail,
                                       long totalRespTime, long minRespTime, long maxRespTime,
+                                      ConcurrentHashMap<String, AtomicInteger> errorBreakdown,
                                       LocalDateTime startTime, LocalDateTime endTime,
                                       long startMillis, long endMillis) {
         int totalRequests = success + fail;
