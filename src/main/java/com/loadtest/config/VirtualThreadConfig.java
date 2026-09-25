@@ -12,27 +12,23 @@ import java.util.concurrent.Executors;
 @Configuration
 public class VirtualThreadConfig {
 
-    @Value("${loadtest.max-platform-threads:500}")
-    private int maxPlatformThreads;
+    private final Duration connectTimeout;
 
-    @Value("${loadtest.http-client.connect-timeout:10s}")
-    private Duration connectTimeout;
-
-    /**
-     * 가상 스레드 Executor
-     * Java 21의 핵심 기능 - 경량 스레드로 수만 개 동시 실행 가능
-     */
-    @Bean(name = "virtualThreadExecutor")
-    public ExecutorService virtualThreadExecutor() {
-        return Executors.newVirtualThreadPerTaskExecutor();
+    public VirtualThreadConfig(@Value("${loadtest.http-client.connect-timeout:10s}") Duration connectTimeout) {
+        this.connectTimeout = connectTimeout;
     }
 
     /**
-     * 일반 플랫폼 스레드 Executor (비교용)
+     * 컨트롤러가 "테스트 실행"을 백그라운드로 시작할 때 쓰는 가상 스레드 executor.
+     * 요청 하나를 처리하는 동안 블로킹되어도 되므로 가상 스레드가 적합하다
+     * (공용 ForkJoinPool.commonPool을 점유하지 않는다).
+     * <p>
+     * 워커 스레드(부하를 만드는 스레드)는 여기가 아니라 실행마다
+     * {@link com.loadtest.service.RunExecutorFactory}가 새로 만든다.
      */
-    @Bean(name = "platformThreadExecutor")
-    public ExecutorService platformThreadExecutor() {
-        return Executors.newFixedThreadPool(maxPlatformThreads);
+    @Bean(name = "testDispatchExecutor")
+    public ExecutorService testDispatchExecutor() {
+        return Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("dispatch-", 0).factory());
     }
 
     /**

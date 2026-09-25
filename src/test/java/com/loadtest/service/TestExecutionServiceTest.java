@@ -18,14 +18,19 @@ import org.springframework.messaging.simp.SimpMessagingTemplate;
 import java.net.http.HttpClient;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.entry;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.BDDMockito.given;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.lenient;
 
 /**
  * {@link TestExecutionService}의 실행 결과 정확성과 실행 간 격리를 검증한다.
@@ -46,8 +51,9 @@ class TestExecutionServiceTest {
     @Mock
     private SimpMessagingTemplate messagingTemplate;
 
-    private ExecutorService virtualExecutor;
-    private ExecutorService platformExecutor;
+    /** 실행마다 만들어진 워커 executor를 기록한다 (정리·격리 검증용) */
+    private final List<ExecutorService> createdExecutors = new CopyOnWriteArrayList<>();
+
     private HttpClient httpClient;
     private TestExecutionService service;
 
@@ -63,26 +69,31 @@ class TestExecutionServiceTest {
 
     @BeforeEach
     void setUp() {
-        virtualExecutor = Executors.newVirtualThreadPerTaskExecutor();
-        platformExecutor = Executors.newFixedThreadPool(4);
+        createdExecutors.clear();
         httpClient = HttpClient.newHttpClient();
 
-        // save() 호출 시 id를 채워 반환한다 (saveExecution()이 saved.getId()를 곧바로 읽으므로 필수)
-        given(executionRepository.save(any(TestExecution.class)))
-                .willAnswer(invocation -> {
+        // save() 호출 시 id를 채워 반환한다 (saveExecution()이 saved.getId()를 곧바로 읽으므로 필수).
+        // 실행이 저장 단계까지 가지 못하는 테스트(워커 실패)도 있으므로 lenient로 둔다.
+        lenient().when(executionRepository.save(any(TestExecution.class)))
+                .thenAnswer(invocation -> {
                     TestExecution execution = invocation.getArgument(0);
                     execution.setId(1L);
                     return execution;
                 });
 
-        service = new TestExecutionService(
-                virtualExecutor, platformExecutor, httpClient, executionRepository, messagingTemplate);
+        RunExecutorFactory recordingFactory = new RunExecutorFactory(4) {
+            @Override
+            public ExecutorService create(TestConfigDto.ThreadType threadType, String testId) {
+                ExecutorService executor = super.create(threadType, testId);
+                createdExecutors.add(executor);
+                return executor;
+            }
+        };
+        service = new TestExecutionService(recordingFactory, httpClient, executionRepository, messagingTemplate);
     }
 
     @AfterEach
     void tearDown() {
-        virtualExecutor.shutdownNow();
-        platformExecutor.shutdownNow();
         targetServer.respondWith(200); // 다음 테스트를 위해 기본값으로 되돌림
     }
 
@@ -132,6 +143,55 @@ class TestExecutionServiceTest {
                 runners.shutdownNow();
             }
         }
+    }
+
+    @Test
+    void 실행이_끝나면_그_실행의_executor는_종료되어_있다() {
+        service.executeTestWithId("test-lifecycle", fixedCountConfig());
+
+        assertThat(createdExecutors).hasSize(1);
+        assertThat(createdExecutors.get(0).isTerminated())
+                .as("try-with-resources close()가 모든 워커의 완료를 기다린 뒤 executor를 종료해야 한다")
+                .isTrue();
+    }
+
+    @Test
+    void 실행마다_서로_다른_executor를_사용한다() {
+        service.executeTestWithId("test-1", fixedCountConfig());
+        service.executeTestWithId("test-2", fixedCountConfig());
+
+        assertThat(createdExecutors).hasSize(2);
+        assertThat(createdExecutors.get(0)).isNotSameAs(createdExecutors.get(1));
+    }
+
+    @Test
+    void 플랫폼_스레드_타입으로도_실행되고_결과를_집계한다() {
+        TestConfigDto platformConfig = TestConfigDto.builder()
+                .url(targetServer.url())
+                .threadType(TestConfigDto.ThreadType.PLATFORM)
+                .virtualThreads(5)
+                .requestsPerThread(2)
+                .build();
+
+        TestResultDto result = service.executeTestWithId("test-platform", platformConfig);
+
+        assertThat(result.getThreadType()).isEqualTo("PLATFORM");
+        assertThat(result.getSuccessCount()).isEqualTo(10);
+        assertThat(result.getFailCount()).isZero();
+        assertThat(createdExecutors).hasSize(1);
+        assertThat(createdExecutors.get(0).isTerminated()).isTrue();
+    }
+
+    @Test
+    void 워커가_예외로_비정상_종료하면_조용히_넘어가지_않고_실패로_드러난다() {
+        // 첫 전송(시작 알림, 메인 스레드)은 통과시키고, 이후 워커가 보내는 진행 메트릭에서 예외를 던진다
+        doNothing().doThrow(new IllegalStateException("broker down"))
+                .when(messagingTemplate).convertAndSend(anyString(), any(Object.class));
+
+        assertThatThrownBy(() -> service.executeTestWithId("test-worker-fail", fixedCountConfig()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("test-worker-fail")
+                .hasRootCauseMessage("broker down");
     }
 
     @Test

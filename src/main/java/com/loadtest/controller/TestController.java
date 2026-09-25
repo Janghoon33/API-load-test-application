@@ -4,23 +4,29 @@ import com.loadtest.dto.TestConfigDto;
 import com.loadtest.dto.TestResultDto;
 import com.loadtest.service.TestExecutionService;
 import jakarta.validation.Valid;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
 
 @Slf4j
 @RestController
 @RequestMapping("/api/tests")
-@RequiredArgsConstructor
 public class TestController {
 
     private final TestExecutionService testExecutionService;
+    private final ExecutorService testDispatchExecutor;
+
+    public TestController(TestExecutionService testExecutionService,
+                          @Qualifier("testDispatchExecutor") ExecutorService testDispatchExecutor) {
+        this.testExecutionService = testExecutionService;
+        this.testDispatchExecutor = testDispatchExecutor;
+    }
 
     /**
      * 부하 테스트 실행 (비동기)
@@ -39,8 +45,14 @@ public class TestController {
         log.info("생성된 testId: {}", testId);
 
         // 비동기로 테스트 실행 (WebSocket으로 진행 상황 전송)
-        CompletableFuture.runAsync(() -> {
-            testExecutionService.executeTestWithId(testId, config);
+        // 전용 가상 스레드 executor에서 실행한다 (예전에는 executor 없이 runAsync를 호출해 공용 ForkJoinPool을 점유했다).
+        // submit()은 예외를 삼키므로 여기서 직접 로그를 남긴다.
+        testDispatchExecutor.submit(() -> {
+            try {
+                testExecutionService.executeTestWithId(testId, config);
+            } catch (Exception e) {
+                log.error("[{}] 테스트 실행 중 오류", testId, e);
+            }
         });
 
         // 즉시 testId 반환

@@ -4,18 +4,23 @@ import tools.jackson.databind.ObjectMapper;
 import com.loadtest.dto.TestConfigDto;
 import com.loadtest.dto.TestResultDto;
 import com.loadtest.service.TestExecutionService;
+import com.loadtest.support.DirectExecutorService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
+
+import java.util.concurrent.ExecutorService;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.BDDMockito.given;
-import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -33,7 +38,21 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * Phase 6에서 {@code @RestControllerAdvice} 도입 후 깔끔한 404로 뒤집는다.
  */
 @WebMvcTest(TestController.class)
+@Import(TestControllerTest.DirectExecutorConfig.class)
 class TestControllerTest {
+
+    /**
+     * 컨트롤러는 테스트 실행을 비동기로 시작한다. 여기서는 동기 executor를 주입해서
+     * "서비스 호출이 언제 끝나는지"를 기다리거나 추측하지 않고 결정적으로 검증한다.
+     * (비동기 executor를 쓰면 늦게 도착한 호출이 다음 테스트의 mock에 새어 검증이 간헐적으로 실패한다.)
+     */
+    @TestConfiguration
+    static class DirectExecutorConfig {
+        @Bean("testDispatchExecutor")
+        ExecutorService testDispatchExecutor() {
+            return new DirectExecutorService();
+        }
+    }
 
     @Autowired
     private MockMvc mockMvc;
@@ -52,11 +71,8 @@ class TestControllerTest {
                 .andExpect(jsonPath("$.testId").exists())
                 .andExpect(jsonPath("$.status").value("STARTED"));
 
-        // 컨트롤러는 서비스 호출을 비동기로 예약하고 바로 응답한다. 호출이 끝나기 전에 테스트가 끝나면
-        // 늦게 도착한 호출이 다음 테스트의 mock에 기록되어 verifyNoInteractions가 간헐적으로 실패한다.
-        // 여기서 호출 도착을 기다려 그 경합을 막고, 올바른 설정으로 실행을 시작했는지도 함께 확인한다.
-        verify(testExecutionService, timeout(2000))
-                .executeTestWithId(anyString(), eq(validConfig().build()));
+        // 올바른 설정으로 테스트 실행을 시작했는지 확인한다 (동기 executor라 응답 시점에 이미 호출되어 있다)
+        verify(testExecutionService).executeTestWithId(anyString(), eq(validConfig().build()));
     }
 
     // 아래 검증 테스트들은 각각 위반 필드를 "딱 하나"만 만든다.

@@ -7,7 +7,6 @@ import com.loadtest.entity.TestExecution;
 import com.loadtest.repository.TestExecutionRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
@@ -19,32 +18,24 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.stream.Collectors;
+import java.util.concurrent.Future;
 
 @Slf4j
 @Service
 public class TestExecutionService {
 
-    private final ExecutorService virtualExecutor;
-    private final ExecutorService platformExecutor;
+    private final RunExecutorFactory runExecutorFactory;
     private final HttpClient httpClient;
     private final TestExecutionRepository executionRepository;
     private final SimpMessagingTemplate messagingTemplate;
 
     public TestExecutionService(
-            @Qualifier("virtualThreadExecutor") ExecutorService virtualExecutor,
-            @Qualifier("platformThreadExecutor") ExecutorService platformExecutor,
+            RunExecutorFactory runExecutorFactory,
             HttpClient httpClient,
             TestExecutionRepository executionRepository,
             SimpMessagingTemplate messagingTemplate) {
-        this.virtualExecutor = virtualExecutor;
-        this.platformExecutor = platformExecutor;
+        this.runExecutorFactory = runExecutorFactory;
         this.httpClient = httpClient;
         this.executionRepository = executionRepository;
         this.messagingTemplate = messagingTemplate;
@@ -64,73 +55,41 @@ public class TestExecutionService {
         log.info("[{}] 테스트 시작 - Type: {}, Threads: {}, Requests/Thread: {}",
                 testId, config.getThreadType(), config.getVirtualThreads(), config.getRequestsPerThread());
 
-        ExecutorService executor = config.getThreadType() == TestConfigDto.ThreadType.VIRTUAL
-                ? virtualExecutor
-                : platformExecutor;
-
-        LocalDateTime startTime = LocalDateTime.now();
-        long startMillis = System.currentTimeMillis();
-
-        // 통계 수집용 변수들
-        AtomicInteger successCount = new AtomicInteger(0);
-        AtomicInteger failCount = new AtomicInteger(0);
-        AtomicInteger completedCount = new AtomicInteger(0);
-        AtomicLong totalResponseTime = new AtomicLong(0);
-        AtomicLong minResponseTime = new AtomicLong(Long.MAX_VALUE);
-        AtomicLong maxResponseTime = new AtomicLong(0);
-        // 실행별 에러 집계 (서비스 필드로 두면 실행 간에 누적·오염된다)
-        ConcurrentHashMap<String, AtomicInteger> errorBreakdown = new ConcurrentHashMap<>();
-
-        int totalRequests = config.getVirtualThreads() * config.getRequestsPerThread();
+        // 이 실행만의 상태 (카운터, 에러 집계). 서비스 필드로 두면 실행 간에 섞인다.
+        TestRunContext ctx = new TestRunContext(testId, config);
 
         // 초기 상태 전송
-        sendRealtimeMetric(testId, totalRequests, 0, 0, 0, startMillis, "RUNNING");
+        sendRealtimeMetric(ctx, 0, "RUNNING");
 
-        List<CompletableFuture<Void>> futures = new ArrayList<>();
+        List<Future<?>> workers = new ArrayList<>();
 
-        // 가상 스레드 또는 플랫폼 스레드 생성
-        for (int i = 0; i < config.getVirtualThreads(); i++) {
-            final int threadId = i;
-
-            CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
-                // 각 스레드가 설정된 횟수만큼 요청 실행
-                for (int j = 0; j < config.getRequestsPerThread(); j++) {
-                    executeRequest(config, threadId, j,
-                            successCount, failCount, completedCount, totalResponseTime,
-                            minResponseTime, maxResponseTime, errorBreakdown);
-
-                    // 실시간 메트릭 전송
-                    int completed = completedCount.get();
-
-                    // 100개마다 또는 완료 시 전송
-                    if (completed % 100 == 0 || completed == totalRequests) {
-                        sendRealtimeMetric(testId, totalRequests, completed,
-                                successCount.get(), failCount.get(), startMillis, "RUNNING");
-                    }
-                }
-            }, executor);
-
-            futures.add(future);
+        // 실행마다 새 executor를 만들고, try-with-resources를 벗어날 때 close()가 모든 워커의 완료를 기다린다.
+        try (ExecutorService executor = runExecutorFactory.create(config.getThreadType(), testId)) {
+            for (int i = 0; i < config.getVirtualThreads(); i++) {
+                final int threadId = i;
+                workers.add(executor.submit(() -> runWorker(ctx, threadId)));
+            }
         }
 
-        // 모든 스레드 완료 대기
-        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+        // submit()은 예외를 Future에 가두므로, 워커가 비정상 종료했다면 조용히 넘어가지 않고 실패로 드러낸다
+        for (Future<?> worker : workers) {
+            if (worker.state() == Future.State.FAILED) {
+                throw new IllegalStateException("[" + testId + "] 워커가 비정상 종료했습니다", worker.exceptionNow());
+            }
+        }
 
         long endMillis = System.currentTimeMillis();
         LocalDateTime endTime = LocalDateTime.now();
 
         // 최종 결과 계산
-        TestResultDto result = buildResult(config, successCount.get(), failCount.get(),
-                totalResponseTime.get(), minResponseTime.get(), maxResponseTime.get(),
-                errorBreakdown, startTime, endTime, startMillis, endMillis);
+        TestResultDto result = buildResult(ctx, endTime, endMillis);
 
         // DB에 저장하고 ID 받아오기
-        Long executionId = saveExecution(config, result, startTime, endTime);
+        Long executionId = saveExecution(config, result, ctx.startedAt(), endTime);
         result.setExecutionId(executionId);
 
         // 완료 상태 전송
-        sendRealtimeMetric(testId, totalRequests, totalRequests,
-                successCount.get(), failCount.get(), startMillis, "COMPLETED");
+        sendRealtimeMetric(ctx, ctx.totalRequests(), "COMPLETED");
 
         // 최종 결과 전송
         messagingTemplate.convertAndSend("/topic/test-complete/" + testId, result);
@@ -142,21 +101,38 @@ public class TestExecutionService {
     }
 
     /**
+     * 가상 사용자 한 명: 설정된 횟수만큼 요청을 순서대로 실행한다.
+     */
+    private void runWorker(TestRunContext ctx, int threadId) {
+        for (int j = 0; j < ctx.config().getRequestsPerThread(); j++) {
+            executeRequest(ctx, threadId, j);
+
+            // 실시간 메트릭 전송
+            int completed = ctx.completedCount();
+
+            // 100개마다 또는 완료 시 전송
+            if (completed % 100 == 0 || completed == ctx.totalRequests()) {
+                sendRealtimeMetric(ctx, completed, "RUNNING");
+            }
+        }
+    }
+
+    /**
      * 실시간 메트릭 전송
      */
-    private void sendRealtimeMetric(String testId, int totalRequests, int completed,
-                                    int success, int fail, long startMillis, String status) {
+    private void sendRealtimeMetric(TestRunContext ctx, int completed, String status) {
         long now = System.currentTimeMillis();
-        long elapsed = now - startMillis;
+        long elapsed = now - ctx.startMillis();
+        int totalRequests = ctx.totalRequests();
         double progress = totalRequests > 0 ? (completed * 100.0) / totalRequests : 0.0;
         double currentTps = elapsed > 0 ? (completed * 1000.0) / elapsed : 0.0;
 
         RealtimeMetricDto metric = RealtimeMetricDto.builder()
-                .testId(testId)
+                .testId(ctx.testId())
                 .totalRequests(totalRequests)
                 .completedRequests(completed)
-                .successCount(success)
-                .failCount(fail)
+                .successCount(ctx.successCount())
+                .failCount(ctx.failCount())
                 .progress(progress)
                 .currentTps(currentTps)
                 .avgResponseTimeMs(0)
@@ -165,7 +141,7 @@ public class TestExecutionService {
                 .status(status)
                 .build();
 
-        messagingTemplate.convertAndSend("/topic/metrics/" + testId, metric);
+        messagingTemplate.convertAndSend("/topic/metrics/" + ctx.testId(), metric);
     }
 
     /**
@@ -179,11 +155,8 @@ public class TestExecutionService {
     /**
      * 개별 HTTP 요청 실행
      */
-    private void executeRequest(TestConfigDto config, int threadId, int requestId,
-                                AtomicInteger successCount, AtomicInteger failCount,
-                                AtomicInteger completedCount, AtomicLong totalResponseTime,
-                                AtomicLong minResponseTime, AtomicLong maxResponseTime,
-                                ConcurrentHashMap<String, AtomicInteger> errorBreakdown) {
+    private void executeRequest(TestRunContext ctx, int threadId, int requestId) {
+        TestConfigDto config = ctx.config();
         try {
             long reqStart = System.currentTimeMillis();
 
@@ -222,41 +195,29 @@ public class TestExecutionService {
             HttpResponse<String> response = httpClient.send(request,
                     HttpResponse.BodyHandlers.ofString());
 
-            long reqTime = System.currentTimeMillis() - reqStart;
-
             // 통계 업데이트
-            totalResponseTime.addAndGet(reqTime);
-            updateMin(minResponseTime, reqTime);
-            updateMax(maxResponseTime, reqTime);
-            completedCount.incrementAndGet();
+            ctx.recordResponse(System.currentTimeMillis() - reqStart);
 
             if (response.statusCode() >= 200 && response.statusCode() < 300) {
-                successCount.incrementAndGet();
+                ctx.recordSuccess();
             } else {
-                failCount.incrementAndGet();
                 // HTTP 에러 분류
                 String errorType = classifyHttpError(response.statusCode());
-                errorBreakdown.computeIfAbsent(errorType, k -> new AtomicInteger()).incrementAndGet();
+                ctx.recordHttpFailure(errorType);
                 log.warn("Thread-{} Request-{} HTTP Error: {} - {}",
                         threadId, requestId, response.statusCode(), errorType);
             }
 
         } catch (java.net.http.HttpTimeoutException e) {
-            failCount.incrementAndGet();
-            completedCount.incrementAndGet();
-            errorBreakdown.computeIfAbsent("TIMEOUT", k -> new AtomicInteger()).incrementAndGet();
+            ctx.recordException("TIMEOUT");
             log.error("Thread-{} Request-{} Timeout", threadId, requestId);
 
         } catch (java.net.ConnectException e) {
-            failCount.incrementAndGet();
-            completedCount.incrementAndGet();
-            errorBreakdown.computeIfAbsent("CONNECTION_FAILED", k -> new AtomicInteger()).incrementAndGet();
+            ctx.recordException("CONNECTION_FAILED");
             log.error("Thread-{} Request-{} Connection Failed", threadId, requestId);
 
         } catch (Exception e) {
-            failCount.incrementAndGet();
-            completedCount.incrementAndGet();
-            errorBreakdown.computeIfAbsent("UNKNOWN", k -> new AtomicInteger()).incrementAndGet();
+            ctx.recordException("UNKNOWN");
             log.error("Thread-{} Request-{} Error: {}", threadId, requestId, e.getMessage());
         }
     }
@@ -274,57 +235,26 @@ public class TestExecutionService {
     }
 
     /**
-     * 최소값 원자적 업데이트
-     */
-    private void updateMin(AtomicLong min, long value) {
-        long current;
-        do {
-            current = min.get();
-            if (value >= current) return;
-        } while (!min.compareAndSet(current, value));
-    }
-
-    /**
-     * 최대값 원자적 업데이트
-     */
-    private void updateMax(AtomicLong max, long value) {
-        long current;
-        do {
-            current = max.get();
-            if (value <= current) return;
-        } while (!max.compareAndSet(current, value));
-    }
-
-    /**
      * 결과 DTO 생성
      */
-    private TestResultDto buildResult(TestConfigDto config, int success, int fail,
-                                      long totalRespTime, long minRespTime, long maxRespTime,
-                                      ConcurrentHashMap<String, AtomicInteger> errorBreakdown,
-                                      LocalDateTime startTime, LocalDateTime endTime,
-                                      long startMillis, long endMillis) {
+    private TestResultDto buildResult(TestRunContext ctx, LocalDateTime endTime, long endMillis) {
+        int success = ctx.successCount();
+        int fail = ctx.failCount();
         int totalRequests = success + fail;
-        long duration = endMillis - startMillis;
-
-        // 에러 breakdown 변환
-        Map<String, Integer> errorMap = errorBreakdown.entrySet().stream()
-                .collect(Collectors.toMap(
-                        Map.Entry::getKey,
-                        e -> e.getValue().get()
-                ));
+        long duration = endMillis - ctx.startMillis();
 
         return TestResultDto.builder()
-                .threadType(config.getThreadType().name())
+                .threadType(ctx.config().getThreadType().name())
                 .totalRequests(totalRequests)
                 .successCount(success)
                 .failCount(fail)
-                .avgResponseTimeMs(totalRequests > 0 ? totalRespTime / totalRequests : 0)
-                .minResponseTimeMs(minRespTime == Long.MAX_VALUE ? 0 : minRespTime)
-                .maxResponseTimeMs(maxRespTime)
+                .avgResponseTimeMs(totalRequests > 0 ? ctx.totalResponseTimeMs() / totalRequests : 0)
+                .minResponseTimeMs(ctx.minResponseTimeMs())
+                .maxResponseTimeMs(ctx.maxResponseTimeMs())
                 .totalDurationMs(duration)
                 .tps(duration > 0 ? (totalRequests * 1000.0) / duration : 0)
-                .errorBreakdown(errorMap)
-                .startedAt(startTime)
+                .errorBreakdown(ctx.errorBreakdown())
+                .startedAt(ctx.startedAt())
                 .completedAt(endTime)
                 .build();
     }
