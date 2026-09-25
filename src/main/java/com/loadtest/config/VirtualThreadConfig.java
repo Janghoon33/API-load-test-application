@@ -1,5 +1,6 @@
 package com.loadtest.config;
 
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -32,13 +33,25 @@ public class VirtualThreadConfig {
     }
 
     /**
+     * HttpClient 내부 작업(응답 처리 등)을 실행할 가상 스레드 executor.
+     * <p>
+     * executor를 지정하지 않으면 JDK가 캐시드 <b>플랫폼</b> 스레드 풀을 만들어 쓴다. 그러면 워커는 가상 스레드인데
+     * HTTP 클라이언트 내부는 플랫폼 스레드 수에 묶여, 동시 요청이 많을수록 플랫폼 스레드가 수백 개로 늘어난다.
+     */
+    @Bean(name = "httpClientExecutor")
+    public ExecutorService httpClientExecutor() {
+        return Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("http-", 0).factory());
+    }
+
+    /**
      * HttpClient - HTTP/1.1로 변경 (동시 스트림 제한 회피)
      */
     @Bean
-    public HttpClient httpClient() {
+    public HttpClient httpClient(@Qualifier("httpClientExecutor") ExecutorService httpClientExecutor) {
         return HttpClient.newBuilder()
                 .connectTimeout(connectTimeout)
                 .version(HttpClient.Version.HTTP_1_1)
+                .executor(httpClientExecutor)
                 .build();
     }
 }
