@@ -5,6 +5,9 @@ import com.loadtest.dto.TestResultDto;
 import com.loadtest.entity.TestExecution;
 import com.loadtest.repository.TestExecutionRepository;
 import com.loadtest.support.FakeTargetServer;
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -13,6 +16,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.LoggerFactory;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 
 import java.net.http.HttpClient;
@@ -195,6 +199,49 @@ class TestExecutionServiceTest {
     }
 
     @Test
+    void 요청_로깅이_꺼져_있으면_에러_응답이어도_요청_단위_로그를_남기지_않는다() {
+        targetServer.respondWith(500);
+        ListAppender<ILoggingEvent> logs = captureServiceLogs();
+
+        try {
+            TestResultDto result = service.executeTestWithId("test-log-off", fixedCountConfigWithLogging(false));
+
+            assertThat(result.getErrorBreakdown()).containsEntry("SERVER_ERROR_500", 10);
+            assertThat(requestLevelLogs(logs)).as("에러는 로그가 아니라 errorBreakdown으로 집계된다").isEmpty();
+        } finally {
+            releaseServiceLogs(logs);
+        }
+    }
+
+    @Test
+    void 요청_로깅이_켜져_있으면_에러_응답마다_로그를_남긴다() {
+        targetServer.respondWith(500);
+        ListAppender<ILoggingEvent> logs = captureServiceLogs();
+
+        try {
+            service.executeTestWithId("test-log-on", fixedCountConfigWithLogging(true));
+
+            assertThat(requestLevelLogs(logs)).hasSize(10);
+        } finally {
+            releaseServiceLogs(logs);
+        }
+    }
+
+    @Test
+    void 요청_로깅_옵션을_지정하지_않으면_기본은_꺼짐이다() {
+        targetServer.respondWith(500);
+        ListAppender<ILoggingEvent> logs = captureServiceLogs();
+
+        try {
+            service.executeTestWithId("test-log-default", fixedCountConfig());
+
+            assertThat(requestLevelLogs(logs)).isEmpty();
+        } finally {
+            releaseServiceLogs(logs);
+        }
+    }
+
+    @Test
     void 성공_응답은_successCount와_tps에_정확히_반영된다() {
         // 응답에 지연을 줘 총 소요시간이 0ms로 반올림되지 않게 한다 (tps 계산 검증용)
         targetServer.respondWith(200, Duration.ofMillis(5));
@@ -225,6 +272,37 @@ class TestExecutionServiceTest {
 
         assertThat(result.getFailCount()).isEqualTo(10);
         assertThat(result.getErrorBreakdown()).containsEntry("SERVER_ERROR_503", 10);
+    }
+
+    private static ch.qos.logback.classic.Logger serviceLogger() {
+        return (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(TestExecutionService.class);
+    }
+
+    private ListAppender<ILoggingEvent> captureServiceLogs() {
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        serviceLogger().addAppender(appender);
+        return appender;
+    }
+
+    private void releaseServiceLogs(ListAppender<ILoggingEvent> appender) {
+        serviceLogger().detachAppender(appender);
+        appender.stop();
+    }
+
+    /** 요청 하나당 남는 로그(WARN 이상). 시작/완료 요약(INFO)은 제외한다. */
+    private static List<ILoggingEvent> requestLevelLogs(ListAppender<ILoggingEvent> appender) {
+        return appender.list.stream().filter(e -> e.getLevel().isGreaterOrEqual(Level.WARN)).toList();
+    }
+
+    private TestConfigDto fixedCountConfigWithLogging(boolean enableLogging) {
+        return TestConfigDto.builder()
+                .url(targetServer.url())
+                .threadType(TestConfigDto.ThreadType.VIRTUAL)
+                .virtualThreads(5)
+                .requestsPerThread(2)
+                .enableLogging(enableLogging)
+                .build();
     }
 
     private TestConfigDto fixedCountConfig() {

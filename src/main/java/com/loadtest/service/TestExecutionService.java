@@ -204,21 +204,30 @@ public class TestExecutionService {
                 // HTTP 에러 분류
                 String errorType = classifyHttpError(response.statusCode());
                 ctx.recordHttpFailure(errorType);
-                log.warn("Thread-{} Request-{} HTTP Error: {} - {}",
-                        threadId, requestId, response.statusCode(), errorType);
+                // 요청 단위 로그는 옵션이다. 에러는 errorBreakdown에 집계되므로 기본(OFF)에서도 잃는 정보가 없다.
+                if (config.isEnableLogging()) {
+                    log.warn("Thread-{} Request-{} HTTP Error: {} - {}",
+                            threadId, requestId, response.statusCode(), errorType);
+                }
             }
 
         } catch (java.net.http.HttpTimeoutException e) {
             ctx.recordException("TIMEOUT");
-            log.error("Thread-{} Request-{} Timeout", threadId, requestId);
+            if (config.isEnableLogging()) {
+                log.error("Thread-{} Request-{} Timeout", threadId, requestId);
+            }
 
         } catch (java.net.ConnectException e) {
             ctx.recordException("CONNECTION_FAILED");
-            log.error("Thread-{} Request-{} Connection Failed", threadId, requestId);
+            if (config.isEnableLogging()) {
+                log.error("Thread-{} Request-{} Connection Failed", threadId, requestId);
+            }
 
         } catch (Exception e) {
             ctx.recordException("UNKNOWN");
-            log.error("Thread-{} Request-{} Error: {}", threadId, requestId, e.getMessage());
+            if (config.isEnableLogging()) {
+                log.error("Thread-{} Request-{} Error: {}", threadId, requestId, e.getMessage());
+            }
         }
     }
 
