@@ -12,7 +12,11 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.BDDMockito.given;
+import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -47,6 +51,12 @@ class TestControllerTest {
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.testId").exists())
                 .andExpect(jsonPath("$.status").value("STARTED"));
+
+        // 컨트롤러는 서비스 호출을 비동기로 예약하고 바로 응답한다. 호출이 끝나기 전에 테스트가 끝나면
+        // 늦게 도착한 호출이 다음 테스트의 mock에 기록되어 verifyNoInteractions가 간헐적으로 실패한다.
+        // 여기서 호출 도착을 기다려 그 경합을 막고, 올바른 설정으로 실행을 시작했는지도 함께 확인한다.
+        verify(testExecutionService, timeout(2000))
+                .executeTestWithId(anyString(), eq(validConfig().build()));
     }
 
     // 아래 검증 테스트들은 각각 위반 필드를 "딱 하나"만 만든다.
