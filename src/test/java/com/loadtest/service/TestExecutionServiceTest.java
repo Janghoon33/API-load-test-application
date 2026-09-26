@@ -29,14 +29,18 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.entry;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 
 /**
  * {@link TestExecutionService}의 실행 결과 정확성과 실행 간 격리를 검증한다.
@@ -316,6 +320,88 @@ class TestExecutionServiceTest {
         service.executeTestWithId("test-budget-virtual", fixedCountConfig());
 
         assertThat(platformBudget.availablePermits()).isEqualTo(4);
+    }
+
+    /** 실행 스레드를 도중에 인터럽트한다. 결과 또는 던져진 예외를 돌려준다. */
+    private record InterruptedRun(Throwable thrown, TestResultDto result) {
+    }
+
+    private InterruptedRun runAndInterrupt(String testId, TestConfigDto config) throws Exception {
+        AtomicReference<Throwable> thrown = new AtomicReference<>();
+        AtomicReference<TestResultDto> result = new AtomicReference<>();
+        Thread runner = Thread.ofPlatform().start(() -> {
+            try {
+                result.set(service.executeTestWithId(testId, config));
+            } catch (Throwable t) {
+                thrown.set(t);
+            }
+        });
+        Thread.sleep(150); // 첫 요청들이 대상 서버 응답을 기다리는 도중
+        runner.interrupt();
+        runner.join(20_000);
+        assertThat(runner.isAlive()).as("인터럽트 후에도 실행이 끝나야 한다").isFalse();
+        return new InterruptedRun(thrown.get(), result.get());
+    }
+
+    private void assertNotReportedAsCompleted(String testId) {
+        verify(executionRepository, never()).save(any(TestExecution.class));
+        verify(messagingTemplate, never()).convertAndSend(eq("/topic/test-complete/" + testId), any(Object.class));
+    }
+
+    @Test
+    void PLATFORM_실행이_도중에_인터럽트되면_일부만_수행된_결과를_저장하거나_완료로_전송하지_않는다() throws Exception {
+        // 워커 10개, 풀 4개 → 6개는 큐에서 대기. shutdownNow()가 큐의 작업을 버려도 완료로 처리하면 안 된다.
+        targetServer.respondWith(200, Duration.ofMillis(300));
+
+        InterruptedRun run = runAndInterrupt("test-int-platform", platformConfig(10, 5));
+
+        assertThat(run.thrown()).as("일부만 수행된 실행은 예외로 끝나야 한다").isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("test-int-platform").hasMessageContaining("중단");
+        assertThat(run.result()).isNull();
+        assertNotReportedAsCompleted("test-int-platform");
+        assertThat(platformBudget.availablePermits()).as("중단되어도 예산은 반환되어야 한다").isEqualTo(4);
+    }
+
+    @Test
+    void VIRTUAL_실행이_도중에_인터럽트되면_일부만_수행된_결과를_저장하거나_완료로_전송하지_않는다() throws Exception {
+        targetServer.respondWith(200, Duration.ofMillis(300));
+        TestConfigDto config = TestConfigDto.builder()
+                .url(targetServer.url())
+                .threadType(TestConfigDto.ThreadType.VIRTUAL)
+                .virtualThreads(10)
+                .requestsPerThread(5)
+                .build();
+
+        targetServer.resetReceivedCount();
+        InterruptedRun run = runAndInterrupt("test-int-virtual", config);
+
+        assertThat(run.thrown()).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("test-int-virtual").hasMessageContaining("중단");
+        assertThat(run.result()).isNull();
+        assertNotReportedAsCompleted("test-int-virtual");
+        // 중단 요청을 받은 뒤에는 남은 요청(워커당 4개, 총 40개)을 대상 서버로 더 보내지 않아야 한다.
+        // 첫 요청 10개는 이미 나간 상태이므로 그 이하여야 한다.
+        assertThat(targetServer.receivedCount())
+                .as("취소 후에도 대상 서버로 요청을 계속 보내면 안 된다")
+                .isLessThanOrEqualTo(10);
+    }
+
+    @Test
+    void 인터럽트된_요청은_실패_통계에_기록하지_않고_인터럽트_상태를_유지한다() {
+        TestRunContext ctx = new TestRunContext("test-int-request", fixedCountConfig());
+
+        Thread.currentThread().interrupt();
+        boolean stillInterrupted;
+        try {
+            service.executeRequest(ctx, 0, 0);
+        } finally {
+            stillInterrupted = Thread.interrupted(); // 확인하면서 다음 테스트를 위해 플래그를 지운다
+        }
+
+        assertThat(stillInterrupted).as("인터럽트 플래그를 복원해야 상위에서 중단을 알 수 있다").isTrue();
+        assertThat(ctx.errorBreakdown()).as("인터럽트는 대상 서버의 실패가 아니다").isEmpty();
+        assertThat(ctx.failCount()).isZero();
+        assertThat(ctx.completedCount()).isZero();
     }
 
     @Test

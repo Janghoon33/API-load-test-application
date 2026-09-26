@@ -87,10 +87,24 @@ public class TestExecutionService {
         }
 
         // submit()은 예외를 Future에 가두므로, 워커가 비정상 종료했다면 조용히 넘어가지 않고 실패로 드러낸다
+        int unfinishedWorkers = 0;
         for (Future<?> worker : workers) {
-            if (worker.state() == Future.State.FAILED) {
+            Future.State state = worker.state();
+            if (state == Future.State.FAILED) {
                 throw new IllegalStateException("[" + testId + "] 워커가 비정상 종료했습니다", worker.exceptionNow());
             }
+            if (state != Future.State.SUCCESS) {
+                unfinishedWorkers++;
+            }
+        }
+
+        // 인터럽트로 close()가 shutdownNow()로 바뀌면 큐에서 시작도 못 한 워커가 있을 수 있고(Future는 끝나지 않은 상태로 남는다),
+        // 진행 중이던 워커도 중간에 멈춘다. 모든 요청은 정확히 한 번 완료 처리되므로 completed == total이 아니면
+        // 일부만 수행된 것이다. 그런 결과를 저장하거나 COMPLETED로 알리지 않고 실패로 끝낸다.
+        if (unfinishedWorkers > 0 || ctx.completedCount() < ctx.totalRequests()) {
+            throw new IllegalStateException(String.format(
+                    "[%s] 실행이 중단되어 일부 요청만 수행되었습니다 (완료 %d/%d, 미완료 워커 %d)",
+                    testId, ctx.completedCount(), ctx.totalRequests(), unfinishedWorkers));
         }
 
         long endMillis = System.currentTimeMillis();
@@ -170,7 +184,8 @@ public class TestExecutionService {
     /**
      * 개별 HTTP 요청 실행
      */
-    private void executeRequest(TestRunContext ctx, int threadId, int requestId) {
+    // 테스트에서 인터럽트 처리를 직접 검증하기 위해 package-private으로 둔다
+    void executeRequest(TestRunContext ctx, int threadId, int requestId) {
         TestConfigDto config = ctx.config();
         try {
             long reqStart = System.currentTimeMillis();
@@ -237,6 +252,10 @@ public class TestExecutionService {
             if (config.isEnableLogging()) {
                 log.error("Thread-{} Request-{} Connection Failed", threadId, requestId);
             }
+
+        } catch (InterruptedException e) {
+            // 중단 요청이다. 대상 서버의 실패가 아니므로 통계에 넣지 않고, 플래그를 복원해 워커가 멈추게 한다.
+            Thread.currentThread().interrupt();
 
         } catch (Exception e) {
             ctx.recordException("UNKNOWN");
