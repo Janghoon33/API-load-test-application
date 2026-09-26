@@ -19,6 +19,14 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public class FakeTargetServer implements AutoCloseable {
 
+    static {
+        // JDK HttpServer는 유휴 keep-alive 연결을 기본 200개까지만 유지하고 초과분을 서버가 먼저 닫는다.
+        // 클라이언트가 수천 개 연결을 재사용하는 부하 테스트에서는 방금 닫힌 연결에 요청을 써서
+        // 간헐적으로 IOException이 나므로(측정 노이즈) 상한을 사실상 없앤다. HttpServer 클래스가
+        // 처음 초기화되기 전에 설정해야 하므로 static 초기화 블록에서 지정한다.
+        System.setProperty("sun.net.httpserver.maxIdleConnections", "100000");
+    }
+
     private final HttpServer server;
     private final AtomicInteger statusCode = new AtomicInteger(200);
     private final AtomicReference<Duration> delay = new AtomicReference<>(Duration.ZERO);
@@ -30,7 +38,10 @@ public class FakeTargetServer implements AutoCloseable {
 
     public static FakeTargetServer start() {
         try {
-            HttpServer server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+            // 백로그를 크게 잡는다(0이면 JDK 기본 50). 수천 개 연결이 한꺼번에 몰리는 부하 테스트에서
+            // accept 대기열이 넘치면 SYN이 버려져 ~1초 단위 재전송 지연이 생기고 측정이 요동친다.
+            // (OS 상한 kern.ipc.somaxconn 이 실효값을 다시 제한한다)
+            HttpServer server = HttpServer.create(new InetSocketAddress("localhost", 0), 4096);
             server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
             FakeTargetServer fake = new FakeTargetServer(server);
 
