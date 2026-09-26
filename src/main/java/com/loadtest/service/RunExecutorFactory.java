@@ -1,7 +1,6 @@
 package com.loadtest.service;
 
 import com.loadtest.dto.TestConfigDto;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.ExecutorService;
@@ -17,19 +16,18 @@ import java.util.concurrent.Executors;
 @Component
 public class RunExecutorFactory {
 
-    private final int maxPlatformThreads;
-
-    public RunExecutorFactory(@Value("${loadtest.max-platform-threads:500}") int maxPlatformThreads) {
-        this.maxPlatformThreads = maxPlatformThreads;
-    }
-
-    public ExecutorService create(TestConfigDto.ThreadType threadType, String testId) {
+    /**
+     * @param poolSize PLATFORM 풀의 크기. {@link PlatformThreadBudget}이 이 실행에 허용한 플랫폼 스레드 수여야 하며,
+     *                 그래야 동시에 겹치는 실행들의 합계가 프로세스 전체 상한을 넘지 않는다. VIRTUAL에서는 무시한다.
+     */
+    public ExecutorService create(TestConfigDto.ThreadType threadType, String testId, int poolSize) {
         return switch (threadType) {
             case VIRTUAL -> Executors.newThreadPerTaskExecutor(
                     Thread.ofVirtual().name("vu-" + testId + "-", 0).factory());
-            // 플랫폼 스레드는 현행 의미(고정 크기 풀)를 유지한다. 가상 스레드와의 공정한 비교 방식은 Phase 3에서 재설계.
+            // 실행마다 풀을 만들지만 크기는 전역 예산이 정해 준 값이라 실행들의 합계는 상한을 넘지 않는다.
+            // 가상 스레드와의 공정한 비교 방식은 Phase 3에서 재설계.
             case PLATFORM -> Executors.newFixedThreadPool(
-                    maxPlatformThreads, Thread.ofPlatform().name("pu-" + testId + "-", 0).factory());
+                    Math.max(1, poolSize), Thread.ofPlatform().name("pu-" + testId + "-", 0).factory());
         };
     }
 }

@@ -26,16 +26,19 @@ import java.util.concurrent.Future;
 public class TestExecutionService {
 
     private final RunExecutorFactory runExecutorFactory;
+    private final PlatformThreadBudget platformThreadBudget;
     private final HttpClient httpClient;
     private final TestExecutionRepository executionRepository;
     private final SimpMessagingTemplate messagingTemplate;
 
     public TestExecutionService(
             RunExecutorFactory runExecutorFactory,
+            PlatformThreadBudget platformThreadBudget,
             HttpClient httpClient,
             TestExecutionRepository executionRepository,
             SimpMessagingTemplate messagingTemplate) {
         this.runExecutorFactory = runExecutorFactory;
+        this.platformThreadBudget = platformThreadBudget;
         this.httpClient = httpClient;
         this.executionRepository = executionRepository;
         this.messagingTemplate = messagingTemplate;
@@ -55,6 +58,18 @@ public class TestExecutionService {
         log.info("[{}] 테스트 시작 - Type: {}, Threads: {}, Requests/Thread: {}",
                 testId, config.getThreadType(), config.getVirtualThreads(), config.getRequestsPerThread());
 
+        // PLATFORM 실행은 시작하기 전에 전역 플랫폼 스레드 예산을 획득한다(부족하면 대기).
+        // 시작 시각 기록(TestRunContext)은 그 뒤에 해야 대기 시간이 TPS 계산에 섞이지 않는다.
+        // 성공·실패·예외 어느 경로로 끝나든 반드시 반환한다.
+        int platformPermits = platformThreadBudget.acquireFor(config);
+        try {
+            return run(testId, config, platformPermits);
+        } finally {
+            platformThreadBudget.release(platformPermits);
+        }
+    }
+
+    private TestResultDto run(String testId, TestConfigDto config, int platformPermits) {
         // 이 실행만의 상태 (카운터, 에러 집계). 서비스 필드로 두면 실행 간에 섞인다.
         TestRunContext ctx = new TestRunContext(testId, config);
 
@@ -64,7 +79,7 @@ public class TestExecutionService {
         List<Future<?>> workers = new ArrayList<>();
 
         // 실행마다 새 executor를 만들고, try-with-resources를 벗어날 때 close()가 모든 워커의 완료를 기다린다.
-        try (ExecutorService executor = runExecutorFactory.create(config.getThreadType(), testId)) {
+        try (ExecutorService executor = runExecutorFactory.create(config.getThreadType(), testId, platformPermits)) {
             for (int i = 0; i < config.getVirtualThreads(); i++) {
                 final int threadId = i;
                 workers.add(executor.submit(() -> runWorker(ctx, threadId)));

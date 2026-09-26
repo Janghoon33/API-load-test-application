@@ -13,11 +13,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class RunExecutorFactoryTest {
 
-    private final RunExecutorFactory factory = new RunExecutorFactory(2);
+    private final RunExecutorFactory factory = new RunExecutorFactory();
 
     @Test
     void 가상_스레드_타입은_가상_스레드에서_실행하고_testId가_들어간_이름을_붙인다() throws Exception {
-        try (ExecutorService executor = factory.create(TestConfigDto.ThreadType.VIRTUAL, "test-abc")) {
+        try (ExecutorService executor = factory.create(TestConfigDto.ThreadType.VIRTUAL, "test-abc", 0)) {
             Future<Boolean> isVirtual = executor.submit(() -> Thread.currentThread().isVirtual());
             Future<String> name = executor.submit(() -> Thread.currentThread().getName());
 
@@ -28,7 +28,7 @@ class RunExecutorFactoryTest {
 
     @Test
     void 플랫폼_스레드_타입은_플랫폼_스레드에서_실행하고_testId가_들어간_이름을_붙인다() throws Exception {
-        try (ExecutorService executor = factory.create(TestConfigDto.ThreadType.PLATFORM, "test-abc")) {
+        try (ExecutorService executor = factory.create(TestConfigDto.ThreadType.PLATFORM, "test-abc", 2)) {
             Future<Boolean> isVirtual = executor.submit(() -> Thread.currentThread().isVirtual());
             Future<String> name = executor.submit(() -> Thread.currentThread().getName());
 
@@ -38,12 +38,12 @@ class RunExecutorFactoryTest {
     }
 
     @Test
-    void 플랫폼_스레드_풀은_설정한_크기를_넘지_않는다() throws Exception {
+    void 플랫폼_스레드_풀은_전달받은_풀_크기를_넘지_않는다() throws Exception {
         AtomicInteger running = new AtomicInteger();
         AtomicInteger maxRunning = new AtomicInteger();
         CountDownLatch release = new CountDownLatch(1);
 
-        try (ExecutorService executor = factory.create(TestConfigDto.ThreadType.PLATFORM, "test-cap")) {
+        try (ExecutorService executor = factory.create(TestConfigDto.ThreadType.PLATFORM, "test-cap", 2)) {
             for (int i = 0; i < 6; i++) {
                 executor.submit(() -> {
                     int now = running.incrementAndGet();
@@ -67,7 +67,7 @@ class RunExecutorFactoryTest {
     void close는_제출된_모든_작업의_완료를_기다린다() {
         AtomicInteger done = new AtomicInteger();
 
-        try (ExecutorService executor = factory.create(TestConfigDto.ThreadType.VIRTUAL, "test-close")) {
+        try (ExecutorService executor = factory.create(TestConfigDto.ThreadType.VIRTUAL, "test-close", 0)) {
             for (int i = 0; i < 100; i++) {
                 executor.submit(() -> {
                     try {

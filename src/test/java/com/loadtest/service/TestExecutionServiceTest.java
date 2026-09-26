@@ -27,6 +27,8 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -59,6 +61,7 @@ class TestExecutionServiceTest {
     private final List<ExecutorService> createdExecutors = new CopyOnWriteArrayList<>();
 
     private HttpClient httpClient;
+    private PlatformThreadBudget platformBudget;
     private TestExecutionService service;
 
     @BeforeAll
@@ -85,15 +88,18 @@ class TestExecutionServiceTest {
                     return execution;
                 });
 
-        RunExecutorFactory recordingFactory = new RunExecutorFactory(4) {
+        // 플랫폼 스레드 전역 상한은 4로 둔다 (동시 PLATFORM 실행의 합계 검증용)
+        platformBudget = new PlatformThreadBudget(4);
+        RunExecutorFactory recordingFactory = new RunExecutorFactory() {
             @Override
-            public ExecutorService create(TestConfigDto.ThreadType threadType, String testId) {
-                ExecutorService executor = super.create(threadType, testId);
+            public ExecutorService create(TestConfigDto.ThreadType threadType, String testId, int poolSize) {
+                ExecutorService executor = super.create(threadType, testId, poolSize);
                 createdExecutors.add(executor);
                 return executor;
             }
         };
-        service = new TestExecutionService(recordingFactory, httpClient, executionRepository, messagingTemplate);
+        service = new TestExecutionService(
+                recordingFactory, platformBudget, httpClient, executionRepository, messagingTemplate);
     }
 
     @AfterEach
@@ -187,6 +193,50 @@ class TestExecutionServiceTest {
     }
 
     @Test
+    void 동시에_실행된_PLATFORM_테스트들의_플랫폼_스레드_합계는_상한을_넘지_않는다() throws Exception {
+        // 상한은 프로세스 전체 기준이다(이 테스트의 PlatformThreadBudget은 4). 실행마다 별도 풀을 만들면
+        // 실행 2개가 겹칠 때 플랫폼 스레드가 8개까지 늘어난다.
+        targetServer.respondWith(200, Duration.ofMillis(100));
+
+        AtomicInteger peak = new AtomicInteger();
+        AtomicBoolean sampling = new AtomicBoolean(true);
+        Thread sampler = Thread.ofPlatform().daemon().start(() -> {
+            while (sampling.get()) {
+                long live = Thread.getAllStackTraces().keySet().stream()
+                        .filter(t -> t.getName().startsWith("pu-") && t.isAlive())
+                        .count();
+                peak.accumulateAndGet((int) live, Math::max);
+                try {
+                    Thread.sleep(5);
+                } catch (InterruptedException e) {
+                    return;
+                }
+            }
+        });
+
+        ExecutorService runners = Executors.newFixedThreadPool(2);
+        try {
+            CompletableFuture<TestResultDto> a = CompletableFuture.supplyAsync(
+                    () -> service.executeTestWithId("test-cap-A", platformConfig(4, 2)), runners);
+            CompletableFuture<TestResultDto> b = CompletableFuture.supplyAsync(
+                    () -> service.executeTestWithId("test-cap-B", platformConfig(4, 2)), runners);
+
+            // 직렬화되어 늦게 시작하더라도 두 실행 모두 정확히 끝나야 한다
+            assertThat(a.get(30, TimeUnit.SECONDS).getSuccessCount()).isEqualTo(8);
+            assertThat(b.get(30, TimeUnit.SECONDS).getSuccessCount()).isEqualTo(8);
+        } finally {
+            sampling.set(false);
+            sampler.join();
+            runners.shutdownNow();
+        }
+
+        assertThat(peak.get()).as("샘플러가 플랫폼 스레드를 실제로 관측해야 한다").isGreaterThan(0);
+        assertThat(peak.get())
+                .as("동시에 실행된 PLATFORM 테스트들의 플랫폼 스레드 합계가 상한(4)을 넘으면 안 된다")
+                .isLessThanOrEqualTo(4);
+    }
+
+    @Test
     void 워커가_예외로_비정상_종료하면_조용히_넘어가지_않고_실패로_드러난다() {
         // 첫 전송(시작 알림, 메인 스레드)은 통과시키고, 이후 워커가 보내는 진행 메트릭에서 예외를 던진다
         doNothing().doThrow(new IllegalStateException("broker down"))
@@ -239,6 +289,33 @@ class TestExecutionServiceTest {
         } finally {
             releaseServiceLogs(logs);
         }
+    }
+
+    @Test
+    void PLATFORM_실행이_정상_종료하면_예산을_전부_반환한다() {
+        service.executeTestWithId("test-budget-ok", platformConfig(3, 2));
+
+        assertThat(platformBudget.availablePermits()).isEqualTo(4);
+    }
+
+    @Test
+    void 워커가_실패해도_PLATFORM_예산은_반환된다() {
+        doNothing().doThrow(new IllegalStateException("broker down"))
+                .when(messagingTemplate).convertAndSend(anyString(), any(Object.class));
+
+        assertThatThrownBy(() -> service.executeTestWithId("test-budget-fail", platformConfig(3, 2)))
+                .isInstanceOf(IllegalStateException.class);
+
+        assertThat(platformBudget.availablePermits())
+                .as("실패한 실행이 permit을 붙잡고 있으면 이후 PLATFORM 실행이 영원히 대기한다")
+                .isEqualTo(4);
+    }
+
+    @Test
+    void VIRTUAL_실행은_플랫폼_예산을_사용하지_않는다() {
+        service.executeTestWithId("test-budget-virtual", fixedCountConfig());
+
+        assertThat(platformBudget.availablePermits()).isEqualTo(4);
     }
 
     @Test
@@ -307,6 +384,15 @@ class TestExecutionServiceTest {
 
     private TestConfigDto fixedCountConfig() {
         return fixedCountConfig(targetServer.url());
+    }
+
+    private TestConfigDto platformConfig(int workers, int requestsPerWorker) {
+        return TestConfigDto.builder()
+                .url(targetServer.url())
+                .threadType(TestConfigDto.ThreadType.PLATFORM)
+                .virtualThreads(workers)
+                .requestsPerThread(requestsPerWorker)
+                .build();
     }
 
     private TestConfigDto fixedCountConfig(String url) {
