@@ -617,6 +617,45 @@ class TestExecutionServiceTest {
     }
 
     @Test
+    void 최종_결과의_GC_힙_스레드는_워커_종료_시점_값이고_핀닝만_확정_후_값이다() {
+        FakePinningMonitor monitor = new FakePinningMonitor(true);
+        AtomicBoolean waited = new AtomicBoolean();
+        monitor.onAwait = () -> waited.set(true);
+        // 실제 JVM 값은 실행 중에도 흔들리므로, 대기 전/후 값을 고정한 프로브로 결정적으로 검증한다.
+        // 대기 이후에는 GC·힙·스레드가 크게 달라진 것으로 흉내 낸다.
+        JvmMetricsProbe probe = new JvmMetricsProbe(monitor) {
+            @Override
+            public Reading read() {
+                PinningMonitor.Snapshot pin = monitor.snapshot();
+                boolean late = waited.get();
+                return new Reading(late ? 999_999L : 1_000L, late ? 210 : 10, late ? 8 : 3, late ? 80 : 30,
+                        4, pin.count(), pin.totalMillis());
+            }
+        };
+        TestExecutionService svc = new TestExecutionService(
+                recordingFactoryRef, platformBudget, httpClient, executionRepository, messagingTemplate,
+                probe, monitor, samplerScheduler, SAMPLE_INTERVAL, SAMPLE_INTERVAL);
+        java.util.concurrent.atomic.AtomicReference<RealtimeMetricDto> completed = new java.util.concurrent.atomic.AtomicReference<>();
+        lenient().doAnswer(invocation -> {
+            RealtimeMetricDto dto = invocation.getArgument(1);
+            if ("COMPLETED".equals(dto.getStatus())) {
+                completed.set(dto);
+            }
+            return null;
+        }).when(messagingTemplate).convertAndSend(eq("/topic/metrics/test-final-runtime"), any(Object.class));
+
+        TestResultDto result = svc.executeTestWithId("test-final-runtime", fixedCountConfig());
+
+        assertThat(result.getGcCount()).as("대기 중 발생한 GC가 이 실행의 몫으로 섞이면 안 된다").isZero();
+        assertThat(result.getGcTimeMs()).isZero();
+        assertThat(result.getPeakHeapBytes()).isEqualTo(1_000L);
+        assertThat(result.getPeakPlatformThreads()).isEqualTo(10);
+        assertThat(result.getPinnedCount()).as("핀닝만 전달 확정 후의 값").isEqualTo(3);
+        assertThat(completed.get().getHeapUsedBytes()).isEqualTo(1_000L);
+        assertThat(completed.get().getPlatformThreadCount()).isEqualTo(10);
+    }
+
+    @Test
     void 꺼진_모니터는_전달_확정을_기다리지_않는다() {
         FakePinningMonitor monitor = new FakePinningMonitor(false);
 

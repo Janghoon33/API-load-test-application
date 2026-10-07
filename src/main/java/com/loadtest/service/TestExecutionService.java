@@ -132,9 +132,12 @@ public class TestExecutionService {
         }
     }
 
-    /** 워커가 모두 끝난 시점의 실행 상태. 종료 시각은 이후의 전달 확정 대기가 섞이지 않도록 여기서 확정한다. */
-    private record FinishedRun(TestRunContext ctx, RunMetricSampler sampler,
-                               long endNanos, long endMillis, LocalDateTime endTime) {
+    /**
+     * 워커가 모두 끝난 시점의 실행 상태. 종료 시각과 최종 샘플(백분위·GC·힙·스레드)은 이후의 전달 확정 대기가
+     * 섞이지 않도록 여기서 확정한다. 대기 뒤에는 핀닝만 다시 읽는다({@link RunMetricSampler#refreshPinning}).
+     */
+    private record FinishedRun(TestRunContext ctx, RunMetricSampler sampler, MetricSample endSample,
+                               long endMillis, LocalDateTime endTime) {
     }
 
     private FinishedRun runWorkers(String testId, TestConfigDto config, int platformPermits) {
@@ -215,8 +218,13 @@ public class TestExecutionService {
                     testId, ctx.completedCount(), ctx.totalRequests(), unfinishedWorkers));
         }
 
-        // 대기 시간이 소요 시간·TPS에 섞이지 않도록 종료 시각은 전달 확정을 기다리기 전에 확정한다
-        return new FinishedRun(ctx, sampler, System.nanoTime(), System.currentTimeMillis(), LocalDateTime.now());
+        // 종료 시각과 최종 샘플은 전달 확정을 기다리기 전에 확정한다. 대기 시간이 소요 시간·TPS뿐 아니라
+        // 대기 중에 달라지는 GC·힙·스레드 값에도 섞이지 않게 하기 위해서다.
+        long endNanos = System.nanoTime();
+        long endMillis = System.currentTimeMillis();
+        LocalDateTime endTime = LocalDateTime.now();
+        MetricSample endSample = sampler.finish(endNanos);
+        return new FinishedRun(ctx, sampler, endSample, endMillis, endTime);
     }
 
     /**
@@ -236,8 +244,8 @@ public class TestExecutionService {
             unsettledRuns.incrementAndGet();
         }
 
-        // 마지막 구간까지 반영한 최종 값 (백분위 포함)
-        MetricSample finalSample = finished.sampler().finish(finished.endNanos());
+        // 핀닝만 전달 확정 후의 값으로 갱신하고, GC·힙·스레드 등은 워커 종료 시점 값을 유지한다
+        MetricSample finalSample = finished.sampler().refreshPinning(finished.endSample());
 
         // 최종 결과 계산
         TestResultDto result = buildResult(ctx, finalSample, endTime, endMillis);
