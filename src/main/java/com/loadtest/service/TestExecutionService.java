@@ -188,7 +188,7 @@ public class TestExecutionService {
     void executeRequest(TestRunContext ctx, int threadId, int requestId) {
         TestConfigDto config = ctx.config();
         try {
-            long reqStart = System.currentTimeMillis();
+            long reqStart = System.nanoTime();
 
             // HttpRequest 빌드
             HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
@@ -226,7 +226,7 @@ public class TestExecutionService {
                     HttpResponse.BodyHandlers.ofString());
 
             // 통계 업데이트
-            ctx.recordResponse(System.currentTimeMillis() - reqStart);
+            ctx.recordResponseNanos(System.nanoTime() - reqStart);
 
             if (response.statusCode() >= 200 && response.statusCode() < 300) {
                 ctx.recordSuccess();

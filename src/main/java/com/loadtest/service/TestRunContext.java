@@ -2,6 +2,9 @@ package com.loadtest.service;
 
 import com.loadtest.dto.TestConfigDto;
 
+import org.HdrHistogram.Histogram;
+import org.HdrHistogram.Recorder;
+
 import java.time.LocalDateTime;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -18,6 +21,10 @@ import java.util.stream.Collectors;
  */
 public final class TestRunContext {
 
+    /** 백분위 히스토그램이 기록하는 최대 지연(마이크로초). 요청 타임아웃(10초)보다 충분히 크다. */
+    private static final long MAX_TRACKABLE_MICROS = 60_000_000L;
+    private static final int SIGNIFICANT_DIGITS = 3;
+
     private final String testId;
     private final TestConfigDto config;
     private final int totalRequests;
@@ -31,6 +38,8 @@ public final class TestRunContext {
     private final AtomicLong minResponseTime = new AtomicLong(Long.MAX_VALUE);
     private final AtomicLong maxResponseTime = new AtomicLong();
     private final ConcurrentHashMap<String, AtomicInteger> errorBreakdown = new ConcurrentHashMap<>();
+    // 단위: 마이크로초. 여러 워커가 동시에 기록해도 안전하고, 읽는 쪽(샘플러)은 구간 단위로 비운다.
+    private final Recorder latencyRecorder = new Recorder(MAX_TRACKABLE_MICROS, SIGNIFICANT_DIGITS);
 
     public TestRunContext(String testId, TestConfigDto config) {
         this.testId = testId;
@@ -40,6 +49,15 @@ public final class TestRunContext {
 
     /** HTTP 응답을 받은 요청의 지연 시간을 기록하고 완료로 센다 (상태코드와 무관). */
     public void recordResponse(long elapsedMs) {
+        recordResponseNanos(elapsedMs * 1_000_000L);
+    }
+
+    /** {@link #recordResponse(long)}의 나노초 버전. 1ms 미만 지연도 백분위에서 구분된다. */
+    public void recordResponseNanos(long elapsedNanos) {
+        long elapsedMs = elapsedNanos / 1_000_000L;
+        // HdrHistogram은 범위를 넘는 값을 예외로 거부하므로 상한으로 잘라서 기록한다
+        long micros = Math.min(Math.max(elapsedNanos / 1_000L, 0L), MAX_TRACKABLE_MICROS);
+        latencyRecorder.recordValue(micros);
         totalResponseTime.addAndGet(elapsedMs);
         minResponseTime.accumulateAndGet(elapsedMs, Math::min);
         maxResponseTime.accumulateAndGet(elapsedMs, Math::max);
@@ -65,6 +83,14 @@ public final class TestRunContext {
 
     private void countError(String errorType) {
         errorBreakdown.computeIfAbsent(errorType, k -> new AtomicInteger()).incrementAndGet();
+    }
+
+    /**
+     * 직전 호출 이후에 기록된 지연의 히스토그램(마이크로초)을 꺼내고 구간을 초기화한다.
+     * 한 곳(샘플러)에서만 호출해야 구간이 서로 겹치거나 빠지지 않는다.
+     */
+    public Histogram drainInterval() {
+        return latencyRecorder.getIntervalHistogram();
     }
 
     public String testId() {
