@@ -39,7 +39,7 @@ public class RealtimeMetricDto {
 
     private int carrierParallelism;  // 가상 스레드 캐리어 풀 크기
 
-    private long pinnedCount;  // 실행 시작 이후 핀닝 수 (JVM 전역 증가분, 최대 약 1초 지연)
+    private long pinnedCount;  // 실행 시작 이후 핀닝 수 (JVM 전역 증가분). 실시간 값은 최대 약 1초 늦고, 완료 시점의 값은 전달 확정 후의 값
 
     private long elapsedTimeMs;  // 경과 시간
 

@@ -71,6 +71,8 @@ class TestExecutionServiceTest {
     private PlatformThreadBudget platformBudget;
     private TestExecutionService service;
     private ScheduledExecutorService samplerScheduler;
+    /** 꺼진 모니터: 실행 종료 시 전달 확정을 기다리지 않으므로 기존 테스트의 소요 시간이 늘지 않는다 */
+    private final PinningMonitor offMonitor = new PinningMonitor(false);
 
     private static final Duration SAMPLE_INTERVAL = Duration.ofMillis(100);
 
@@ -113,22 +115,27 @@ class TestExecutionServiceTest {
         recordingFactoryRef = recordingFactory;
         service = new TestExecutionService(
                 recordingFactory, platformBudget, httpClient, executionRepository, messagingTemplate,
-                new JvmMetricsProbe(new PinningMonitor(false)), samplerScheduler, SAMPLE_INTERVAL, SAMPLE_INTERVAL);
+                new JvmMetricsProbe(offMonitor), offMonitor, samplerScheduler, SAMPLE_INTERVAL, SAMPLE_INTERVAL);
     }
 
     @AfterEach
     void tearDown() {
         samplerScheduler.shutdownNow();
-        targetServer.respondWith(200); // 다음 테스트를 위해 기본값으로 되돌림
+        // 다음 테스트를 위해 기본값으로 되돌림. 상태코드만 바꾸는 respondWith(200)은 앞 테스트의 지연을 남기므로 지연도 함께 초기화한다.
+        targetServer.respondWith(200, Duration.ZERO);
     }
 
     private RunExecutorFactory recordingFactoryRef;
 
     /** 워커가 요청을 수행하다 예외로 비정상 종료하는 서비스 (요청 실행 단계가 깨진 경우를 흉내 낸다) */
     private TestExecutionService serviceWithFailingWorkers() {
+        return serviceWithFailingWorkers(offMonitor);
+    }
+
+    private TestExecutionService serviceWithFailingWorkers(PinningMonitor monitor) {
         return new TestExecutionService(
                 recordingFactoryRef, platformBudget, httpClient, executionRepository, messagingTemplate,
-                new JvmMetricsProbe(new PinningMonitor(false)), samplerScheduler, SAMPLE_INTERVAL, SAMPLE_INTERVAL) {
+                new JvmMetricsProbe(monitor), monitor, samplerScheduler, SAMPLE_INTERVAL, SAMPLE_INTERVAL) {
             @Override
             void executeRequest(TestRunContext ctx, int threadId, int requestId) {
                 throw new IllegalStateException("worker down");
@@ -459,7 +466,7 @@ class TestExecutionServiceTest {
     private TestExecutionService serviceWith(JvmMetricsProbe probe, Duration tick, Duration peak) {
         return new TestExecutionService(
                 recordingFactoryRef, platformBudget, httpClient, executionRepository, messagingTemplate,
-                probe, samplerScheduler, tick, peak);
+                probe, offMonitor, samplerScheduler, tick, peak);
     }
 
     @Test
@@ -495,6 +502,171 @@ class TestExecutionServiceTest {
         int settled = reads.get();
         Thread.sleep(150);
         assertThat(reads.get()).as("끝난 실행의 관측기가 계속 읽으면 안 된다").isEqualTo(settled);
+    }
+
+    /** JFR 없이 "전달 확정 전에는 핀닝이 0건, 확정 후에는 3건"을 흉내 내는 모니터 */
+    private static class FakePinningMonitor extends PinningMonitor {
+        private final boolean running;
+        final AtomicBoolean delivered = new AtomicBoolean();
+        final AtomicInteger awaitCalls = new AtomicInteger();
+        volatile Runnable onAwait = () -> { };
+        volatile boolean confirm = true;
+
+        FakePinningMonitor(boolean running) {
+            super(false);
+            this.running = running;
+        }
+
+        @Override
+        public boolean isRunning() {
+            return running;
+        }
+
+        @Override
+        public boolean awaitDelivery() {
+            awaitCalls.incrementAndGet();
+            onAwait.run();
+            delivered.set(true); // 대기가 끝나야 지연된 이벤트가 도착한다
+            return confirm;
+        }
+
+        @Override
+        public Snapshot snapshot() {
+            return delivered.get()
+                    ? new Snapshot(3, 30, java.util.Map.of())
+                    : new Snapshot(0, 0, java.util.Map.of());
+        }
+    }
+
+    private TestExecutionService serviceWithMonitor(FakePinningMonitor monitor) {
+        return new TestExecutionService(
+                recordingFactoryRef, platformBudget, httpClient, executionRepository, messagingTemplate,
+                new JvmMetricsProbe(monitor), monitor, samplerScheduler, SAMPLE_INTERVAL, SAMPLE_INTERVAL);
+    }
+
+    @Test
+    void 최종_결과의_핀닝은_이벤트_전달을_확정한_뒤의_값이다() {
+        FakePinningMonitor monitor = new FakePinningMonitor(true);
+
+        TestResultDto result = serviceWithMonitor(monitor).executeTestWithId("test-pin-settle", fixedCountConfig());
+
+        // 확정 전에 최종 스냅샷을 만들었다면 0으로 저장된다 (마지막 구간의 핀닝이 영구히 누락)
+        assertThat(result.getPinnedCount()).isEqualTo(3);
+        assertThat(result.getPinnedTimeMs()).isEqualTo(30);
+        org.mockito.ArgumentCaptor<TestExecution> saved = org.mockito.ArgumentCaptor.forClass(TestExecution.class);
+        verify(executionRepository).save(saved.capture());
+        assertThat(saved.getValue().getPinnedCount()).isEqualTo(3);
+    }
+
+    @Test
+    void 전달_확정_대기는_PLATFORM_예산을_반환한_뒤에_한다() {
+        FakePinningMonitor monitor = new FakePinningMonitor(true);
+        AtomicInteger permitsDuringWait = new AtomicInteger(-1);
+        monitor.onAwait = () -> permitsDuringWait.set(platformBudget.availablePermits());
+
+        serviceWithMonitor(monitor).executeTestWithId("test-pin-permits", platformConfig(3, 2));
+
+        assertThat(permitsDuringWait.get())
+                .as("대기 중에 예산을 쥐고 있으면 뒤따르는 PLATFORM 실행이 불필요하게 막힌다")
+                .isEqualTo(4);
+    }
+
+    @Test
+    void 전달_확정_대기_시간은_실행_시간에_섞이지_않는다() {
+        FakePinningMonitor monitor = new FakePinningMonitor(true);
+        monitor.onAwait = () -> {
+            try {
+                Thread.sleep(400);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        };
+
+        TestResultDto result = serviceWithMonitor(monitor).executeTestWithId("test-pin-duration", fixedCountConfig());
+
+        assertThat(result.getTotalDurationMs())
+                .as("대기가 소요 시간·TPS에 섞이면 부하 도구의 측정값이 틀어진다")
+                .isLessThan(400);
+        assertThat(result.getCompletedAt()).isNotNull();
+    }
+
+    @Test
+    void 완료_메트릭의_경과_시간과_순간_TPS에도_대기_시간이_섞이지_않는다() {
+        FakePinningMonitor monitor = new FakePinningMonitor(true);
+        monitor.onAwait = () -> {
+            try {
+                Thread.sleep(400);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        };
+        java.util.concurrent.atomic.AtomicReference<RealtimeMetricDto> completed = new java.util.concurrent.atomic.AtomicReference<>();
+        lenient().doAnswer(invocation -> {
+            RealtimeMetricDto dto = invocation.getArgument(1);
+            if ("COMPLETED".equals(dto.getStatus())) {
+                completed.set(dto);
+            }
+            return null;
+        }).when(messagingTemplate).convertAndSend(eq("/topic/metrics/test-pin-elapsed"), any(Object.class));
+
+        serviceWithMonitor(monitor).executeTestWithId("test-pin-elapsed", fixedCountConfig());
+
+        assertThat(completed.get().getElapsedTimeMs())
+                .as("COMPLETED 메트릭의 경과 시간은 워커가 끝난 시각 기준이어야 한다")
+                .isLessThan(400);
+    }
+
+    @Test
+    void 꺼진_모니터는_전달_확정을_기다리지_않는다() {
+        FakePinningMonitor monitor = new FakePinningMonitor(false);
+
+        TestResultDto result = serviceWithMonitor(monitor).executeTestWithId("test-pin-off", fixedCountConfig());
+
+        assertThat(monitor.awaitCalls.get()).isZero();
+        assertThat(result.getPinnedCount()).isZero();
+    }
+
+    @Test
+    void 전달_확정이_제한_시간을_넘겨도_결과는_정상_저장되고_전송된다() {
+        FakePinningMonitor monitor = new FakePinningMonitor(true);
+        monitor.confirm = false;
+
+        TestResultDto result = serviceWithMonitor(monitor).executeTestWithId("test-pin-timeout", fixedCountConfig());
+
+        assertThat(result.getTotalRequests()).isEqualTo(10);
+        verify(executionRepository).save(any(TestExecution.class));
+        verify(messagingTemplate).convertAndSend(eq("/topic/test-complete/test-pin-timeout"), any(Object.class));
+    }
+
+    @Test
+    void COMPLETED는_전달_확정_뒤에_전송되고_그_사이에_RUNNING이_끼지_않는다() {
+        FakePinningMonitor monitor = new FakePinningMonitor(true);
+        List<String> events = new CopyOnWriteArrayList<>();
+        monitor.onAwait = () -> events.add("AWAIT");
+        lenient().doAnswer(invocation -> {
+            RealtimeMetricDto dto = invocation.getArgument(1);
+            events.add(dto.getStatus());
+            return null;
+        }).when(messagingTemplate).convertAndSend(eq("/topic/metrics/test-pin-order"), any(Object.class));
+
+        serviceWithMonitor(monitor).executeTestWithId("test-pin-order", fixedCountConfig());
+
+        int await = events.indexOf("AWAIT");
+        assertThat(await).as("전달 확정 대기가 있어야 한다").isGreaterThanOrEqualTo(0);
+        assertThat(events.subList(await + 1, events.size()))
+                .as("대기 이후에는 COMPLETED 하나만 온다")
+                .containsExactly("COMPLETED");
+    }
+
+    @Test
+    void 워커가_실패한_실행은_전달_확정을_기다리지_않는다() {
+        FakePinningMonitor monitor = new FakePinningMonitor(true);
+
+        assertThatThrownBy(() -> serviceWithFailingWorkers(monitor)
+                .executeTestWithId("test-pin-fail", fixedCountConfig()))
+                .isInstanceOf(IllegalStateException.class);
+
+        assertThat(monitor.awaitCalls.get()).as("저장하지 않는 실행은 기다릴 이유가 없다").isZero();
     }
 
     @Test

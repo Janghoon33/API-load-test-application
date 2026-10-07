@@ -30,6 +30,9 @@ spring.web.cors:
 loadtest:
   max-virtual-threads: 50000
   max-platform-threads: 500
+  pinning-monitor:
+    # 실행 종료 시 JFR 핀닝 이벤트 전달을 확정하기 위해 최대 이만큼 기다린다 (0이면 기다리지 않는다)
+    settle-timeout: 2s
   metrics:
     sample-interval: 1s
     peak-sample-interval: 50ms

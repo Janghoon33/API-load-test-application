@@ -11,7 +11,7 @@ package com.loadtest.service;
  * @param peakPlatformThreads 실행 중 관측한 최대 플랫폼 스레드 수
  * @param gcCount             실행 중 발생한 GC 횟수 (JVM 전역 증가분)
  * @param gcTimeMs            실행 중 소요된 GC 시간(ms) (JVM 전역 증가분)
- * @param pinnedCount         실행 중 발생한 핀닝 수 (JVM 전역 증가분, 최대 약 1초 지연)
+ * @param pinnedCount         실행 중 발생한 핀닝 수 (JVM 전역 증가분). 주기 샘플은 JFR 배치 전달 때문에 최대 약 1초 늦고, 최종 결과만 전달 확정 후의 값
  * @param pinnedTimeMs        실행 중 핀닝 누적 시간(ms)
  */
 public record RuntimeSnapshot(

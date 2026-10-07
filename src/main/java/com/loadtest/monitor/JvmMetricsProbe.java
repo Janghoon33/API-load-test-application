@@ -14,7 +14,8 @@ import java.lang.management.ThreadMXBean;
  * 실행 시작 시점의 값과 비교해서 구한다. 따라서 동시에 도는 실행이 있으면 GC·핀닝 증가분은 서로 섞일 수 있다.
  * <p>
  * 한계: {@link ThreadMXBean#getThreadCount()}는 <b>플랫폼 스레드만</b> 센다(가상 스레드는 포함되지 않는다).
- * 핀닝은 JFR 스트림이 이벤트를 배치로 전달하므로 최대 약 1초 늦게 반영된다.
+ * 핀닝은 JFR 스트림이 이벤트를 배치로 전달하므로 {@link #read()}의 값은 최대 약 1초 늦게 반영된다.
+ * 최종 결과를 만들 때는 먼저 {@link PinningMonitor#awaitDelivery()}로 전달을 확정해야 마지막 구간이 누락되지 않는다.
  */
 @Component
 public class JvmMetricsProbe {

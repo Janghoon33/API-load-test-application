@@ -54,7 +54,7 @@ public class TestResultDto {
 
     private Long gcTimeMs;
 
-    private Long pinnedCount; // 실행 중 핀닝 수 (JVM 전역 증가분, 최대 약 1초 지연)
+    private Long pinnedCount; // 실행 중 핀닝 수 (JVM 전역 증가분). 실행 종료 시 JFR 이벤트 전달을 확정한 뒤의 값
 
     private Long pinnedTimeMs;
 

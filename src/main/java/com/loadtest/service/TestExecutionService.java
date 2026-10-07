@@ -6,6 +6,7 @@ import com.loadtest.dto.TestResultDto;
 import com.loadtest.dto.RealtimeMetricDto;
 import com.loadtest.entity.TestExecution;
 import com.loadtest.monitor.JvmMetricsProbe;
+import com.loadtest.monitor.PinningMonitor;
 import com.loadtest.repository.TestExecutionRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -39,6 +40,7 @@ public class TestExecutionService {
     private final TestExecutionRepository executionRepository;
     private final SimpMessagingTemplate messagingTemplate;
     private final JvmMetricsProbe jvmMetricsProbe;
+    private final PinningMonitor pinningMonitor;
     private final ScheduledExecutorService metricSamplerScheduler;
     private final Duration sampleInterval;
     private final Duration peakSampleInterval;
@@ -50,6 +52,7 @@ public class TestExecutionService {
             TestExecutionRepository executionRepository,
             SimpMessagingTemplate messagingTemplate,
             JvmMetricsProbe jvmMetricsProbe,
+            PinningMonitor pinningMonitor,
             @Qualifier("metricSamplerScheduler") ScheduledExecutorService metricSamplerScheduler,
             @Value("${loadtest.metrics.sample-interval:1s}") Duration sampleInterval,
             @Value("${loadtest.metrics.peak-sample-interval:50ms}") Duration peakSampleInterval) {
@@ -59,6 +62,7 @@ public class TestExecutionService {
         this.executionRepository = executionRepository;
         this.messagingTemplate = messagingTemplate;
         this.jvmMetricsProbe = jvmMetricsProbe;
+        this.pinningMonitor = pinningMonitor;
         this.metricSamplerScheduler = metricSamplerScheduler;
         this.sampleInterval = sampleInterval;
         this.peakSampleInterval = peakSampleInterval;
@@ -82,14 +86,22 @@ public class TestExecutionService {
         // 시작 시각 기록(TestRunContext)은 그 뒤에 해야 대기 시간이 TPS 계산에 섞이지 않는다.
         // 성공·실패·예외 어느 경로로 끝나든 반드시 반환한다.
         int platformPermits = platformThreadBudget.acquireFor(config);
+        FinishedRun finished;
         try {
-            return run(testId, config, platformPermits);
+            finished = runWorkers(testId, config, platformPermits);
         } finally {
             platformThreadBudget.release(platformPermits);
         }
+        // 핀닝 전달을 기다리는 동안에는 예산을 쥐고 있을 이유가 없으므로 반환한 뒤에 마무리한다
+        return complete(testId, config, finished);
     }
 
-    private TestResultDto run(String testId, TestConfigDto config, int platformPermits) {
+    /** 워커가 모두 끝난 시점의 실행 상태. 종료 시각은 이후의 전달 확정 대기가 섞이지 않도록 여기서 확정한다. */
+    private record FinishedRun(TestRunContext ctx, RunMetricSampler sampler,
+                               long endNanos, long endMillis, LocalDateTime endTime) {
+    }
+
+    private FinishedRun runWorkers(String testId, TestConfigDto config, int platformPermits) {
         // 이 실행만의 상태 (카운터, 에러 집계). 서비스 필드로 두면 실행 간에 섞인다.
         TestRunContext ctx = new TestRunContext(testId, config);
 
@@ -167,11 +179,28 @@ public class TestExecutionService {
                     testId, ctx.completedCount(), ctx.totalRequests(), unfinishedWorkers));
         }
 
-        // 마지막 구간까지 반영한 최종 값 (백분위 포함)
-        MetricSample finalSample = sampler.finish(System.nanoTime());
+        // 대기 시간이 소요 시간·TPS에 섞이지 않도록 종료 시각은 전달 확정을 기다리기 전에 확정한다
+        return new FinishedRun(ctx, sampler, System.nanoTime(), System.currentTimeMillis(), LocalDateTime.now());
+    }
 
-        long endMillis = System.currentTimeMillis();
-        LocalDateTime endTime = LocalDateTime.now();
+    /**
+     * 최종 결과를 만들어 저장하고 전송한다.
+     * <p>
+     * JFR 핀닝 이벤트는 배치로 늦게 전달되므로, 전달을 확정하기 전에 최종 스냅샷을 만들면 마지막 구간의 핀닝이
+     * 결과(DB)에서 영구히 누락된다. 그래서 스냅샷 전에 모니터에 전달 확정을 요청한다(최대 설정된 제한 시간).
+     * 모니터가 꺼져 있으면 기다리지 않는다.
+     */
+    private TestResultDto complete(String testId, TestConfigDto config, FinishedRun finished) {
+        TestRunContext ctx = finished.ctx();
+        long endMillis = finished.endMillis();
+        LocalDateTime endTime = finished.endTime();
+
+        if (pinningMonitor.isRunning()) {
+            pinningMonitor.awaitDelivery();
+        }
+
+        // 마지막 구간까지 반영한 최종 값 (백분위 포함)
+        MetricSample finalSample = finished.sampler().finish(finished.endNanos());
 
         // 최종 결과 계산
         TestResultDto result = buildResult(ctx, finalSample, endTime, endMillis);
