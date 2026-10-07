@@ -4,6 +4,8 @@ import com.loadtest.dto.RealtimeMetricDto;
 import com.loadtest.dto.TestConfigDto;
 import com.loadtest.dto.TestResultDto;
 import com.loadtest.entity.TestExecution;
+import com.loadtest.monitor.JvmMetricsProbe;
+import com.loadtest.monitor.PinningMonitor;
 import com.loadtest.repository.TestExecutionRepository;
 import com.loadtest.support.FakeTargetServer;
 import ch.qos.logback.classic.Level;
@@ -111,7 +113,7 @@ class TestExecutionServiceTest {
         recordingFactoryRef = recordingFactory;
         service = new TestExecutionService(
                 recordingFactory, platformBudget, httpClient, executionRepository, messagingTemplate,
-                samplerScheduler, SAMPLE_INTERVAL);
+                new JvmMetricsProbe(new PinningMonitor(false)), samplerScheduler, SAMPLE_INTERVAL);
     }
 
     @AfterEach
@@ -126,7 +128,7 @@ class TestExecutionServiceTest {
     private TestExecutionService serviceWithFailingWorkers() {
         return new TestExecutionService(
                 recordingFactoryRef, platformBudget, httpClient, executionRepository, messagingTemplate,
-                samplerScheduler, SAMPLE_INTERVAL) {
+                new JvmMetricsProbe(new PinningMonitor(false)), samplerScheduler, SAMPLE_INTERVAL) {
             @Override
             void executeRequest(TestRunContext ctx, int threadId, int requestId) {
                 throw new IllegalStateException("worker down");

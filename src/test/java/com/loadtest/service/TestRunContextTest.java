@@ -103,6 +103,19 @@ class TestRunContextTest {
     }
 
     @Test
+    void 활성_워커_수는_시작과_종료에_따라_증감한다() {
+        TestRunContext ctx = newContext();
+        assertThat(ctx.activeWorkers()).isZero();
+
+        ctx.workerStarted();
+        ctx.workerStarted();
+        assertThat(ctx.activeWorkers()).isEqualTo(2);
+
+        ctx.workerFinished();
+        assertThat(ctx.activeWorkers()).isEqualTo(1);
+    }
+
+    @Test
     void 지연이_기록되지_않았으면_최소값은_0이다() {
         assertThat(newContext().minResponseTimeMs()).isZero();
     }

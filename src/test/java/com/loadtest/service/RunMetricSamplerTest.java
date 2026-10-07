@@ -2,7 +2,10 @@ package com.loadtest.service;
 
 import com.loadtest.dto.PercentilesDto;
 import com.loadtest.dto.TestConfigDto;
+import com.loadtest.monitor.JvmMetricsProbe.Reading;
 import org.junit.jupiter.api.Test;
+
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.within;
@@ -21,7 +24,13 @@ class RunMetricSamplerTest {
             .virtualThreads(10)
             .requestsPerThread(100)
             .build());
-    private final RunMetricSampler sampler = new RunMetricSampler(ctx, START);
+    /** JVM 전역 누적값을 테스트가 직접 조작한다 */
+    private final AtomicReference<Reading> jvm = new AtomicReference<>(reading(100, 10, 0, 0, 0, 0));
+    private final RunMetricSampler sampler = new RunMetricSampler(ctx, START, jvm::get);
+
+    private static Reading reading(long heap, int threads, long gcCount, long gcTimeMs, long pinned, long pinnedMs) {
+        return new Reading(heap, threads, gcCount, gcTimeMs, 4, pinned, pinnedMs);
+    }
 
     private void respond(int count, long ms) {
         for (int i = 0; i < count; i++) {
@@ -105,5 +114,60 @@ class RunMetricSamplerTest {
         assertThat(sample.success()).isEqualTo(3);
         assertThat(sample.fail()).isEqualTo(1);
         assertThat(sample.elapsedMs()).isEqualTo(2000);
+    }
+
+    @Test
+    void GC와_핀닝은_실행_시작_시점_대비_증가분이다() {
+        // 샘플러를 만든 시점(기준선)에 JVM은 이미 GC 7회·핀닝 3회를 겪은 상태였다 → 이 실행의 몫이 아니다
+        AtomicReference<Reading> before = new AtomicReference<>(reading(100, 10, 7, 70, 3, 30));
+        RunMetricSampler late = new RunMetricSampler(ctx, START, before::get);
+
+        before.set(reading(100, 10, 9, 95, 5, 50));
+        RuntimeSnapshot runtime = late.sample(START + SECOND).runtime();
+
+        assertThat(runtime.gcCount()).isEqualTo(2);
+        assertThat(runtime.gcTimeMs()).isEqualTo(25);
+        assertThat(runtime.pinnedCount()).isEqualTo(2);
+        assertThat(runtime.pinnedTimeMs()).isEqualTo(20);
+    }
+
+    @Test
+    void 피크_힙과_피크_플랫폼_스레드는_샘플_중_최댓값이다() {
+        jvm.set(reading(500, 20, 0, 0, 0, 0));
+        sampler.sample(START + SECOND);
+        jvm.set(reading(900, 80, 0, 0, 0, 0));
+        sampler.sample(START + 2 * SECOND);
+        jvm.set(reading(300, 15, 0, 0, 0, 0));
+        RuntimeSnapshot last = sampler.sample(START + 3 * SECOND).runtime();
+
+        assertThat(last.heapUsedBytes()).as("현재값은 마지막 샘플").isEqualTo(300);
+        assertThat(last.platformThreads()).isEqualTo(15);
+        assertThat(last.peakHeapBytes()).isEqualTo(900);
+        assertThat(last.peakPlatformThreads()).isEqualTo(80);
+    }
+
+    @Test
+    void 기준선_시점의_값도_피크에_포함된다() {
+        jvm.set(reading(100, 10, 0, 0, 0, 0));
+        RunMetricSampler fresh = new RunMetricSampler(ctx, START, jvm::get);
+        jvm.set(reading(50, 5, 0, 0, 0, 0));
+
+        RuntimeSnapshot runtime = fresh.sample(START + SECOND).runtime();
+
+        assertThat(runtime.peakHeapBytes()).isEqualTo(100);
+        assertThat(runtime.peakPlatformThreads()).isEqualTo(10);
+    }
+
+    @Test
+    void 활성_워커_수와_캐리어_풀_크기가_샘플에_담긴다() {
+        ctx.workerStarted();
+        ctx.workerStarted();
+        ctx.workerStarted();
+        ctx.workerFinished();
+
+        RuntimeSnapshot runtime = sampler.sample(START + SECOND).runtime();
+
+        assertThat(runtime.activeWorkers()).isEqualTo(2);
+        assertThat(runtime.carrierParallelism()).isEqualTo(4);
     }
 }

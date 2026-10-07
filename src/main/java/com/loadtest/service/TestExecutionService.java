@@ -5,6 +5,7 @@ import com.loadtest.dto.TestConfigDto;
 import com.loadtest.dto.TestResultDto;
 import com.loadtest.dto.RealtimeMetricDto;
 import com.loadtest.entity.TestExecution;
+import com.loadtest.monitor.JvmMetricsProbe;
 import com.loadtest.repository.TestExecutionRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -37,6 +38,7 @@ public class TestExecutionService {
     private final HttpClient httpClient;
     private final TestExecutionRepository executionRepository;
     private final SimpMessagingTemplate messagingTemplate;
+    private final JvmMetricsProbe jvmMetricsProbe;
     private final ScheduledExecutorService metricSamplerScheduler;
     private final Duration sampleInterval;
 
@@ -46,6 +48,7 @@ public class TestExecutionService {
             HttpClient httpClient,
             TestExecutionRepository executionRepository,
             SimpMessagingTemplate messagingTemplate,
+            JvmMetricsProbe jvmMetricsProbe,
             @Qualifier("metricSamplerScheduler") ScheduledExecutorService metricSamplerScheduler,
             @Value("${loadtest.metrics.sample-interval:1s}") Duration sampleInterval) {
         this.runExecutorFactory = runExecutorFactory;
@@ -53,6 +56,7 @@ public class TestExecutionService {
         this.httpClient = httpClient;
         this.executionRepository = executionRepository;
         this.messagingTemplate = messagingTemplate;
+        this.jvmMetricsProbe = jvmMetricsProbe;
         this.metricSamplerScheduler = metricSamplerScheduler;
         this.sampleInterval = sampleInterval;
     }
@@ -87,7 +91,7 @@ public class TestExecutionService {
         TestRunContext ctx = new TestRunContext(testId, config);
 
         // 지표 계산·전송은 워커가 아니라 샘플러 스케줄러가 주기적으로 맡는다. 워커는 요청만 수행한다.
-        RunMetricSampler sampler = new RunMetricSampler(ctx, System.nanoTime());
+        RunMetricSampler sampler = new RunMetricSampler(ctx, System.nanoTime(), jvmMetricsProbe::read);
         sendRealtimeMetric(ctx, sampler.sample(System.nanoTime()), "RUNNING");
 
         // 틱과 실행 종료가 겹쳐도 종료(COMPLETED) 뒤에 RUNNING이 늦게 도착하지 않도록 같은 락으로 직렬화한다
@@ -175,8 +179,13 @@ public class TestExecutionService {
      * 가상 사용자 한 명: 설정된 횟수만큼 요청을 순서대로 실행한다.
      */
     private void runWorker(TestRunContext ctx, int threadId) {
-        for (int j = 0; j < ctx.config().getRequestsPerThread(); j++) {
-            executeRequest(ctx, threadId, j);
+        ctx.workerStarted();
+        try {
+            for (int j = 0; j < ctx.config().getRequestsPerThread(); j++) {
+                executeRequest(ctx, threadId, j);
+            }
+        } finally {
+            ctx.workerFinished();
         }
     }
 

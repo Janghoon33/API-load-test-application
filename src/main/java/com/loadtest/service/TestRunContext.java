@@ -34,6 +34,7 @@ public final class TestRunContext {
     private final AtomicInteger successCount = new AtomicInteger();
     private final AtomicInteger failCount = new AtomicInteger();
     private final AtomicInteger completedCount = new AtomicInteger();
+    private final AtomicInteger activeWorkers = new AtomicInteger();
     private final AtomicLong totalResponseTime = new AtomicLong();
     private final AtomicLong minResponseTime = new AtomicLong(Long.MAX_VALUE);
     private final AtomicLong maxResponseTime = new AtomicLong();
@@ -91,6 +92,19 @@ public final class TestRunContext {
      */
     public Histogram drainInterval() {
         return latencyRecorder.getIntervalHistogram();
+    }
+
+    public void workerStarted() {
+        activeWorkers.incrementAndGet();
+    }
+
+    public void workerFinished() {
+        activeWorkers.decrementAndGet();
+    }
+
+    /** 시작했지만 아직 끝나지 않은 워커 수 */
+    public int activeWorkers() {
+        return activeWorkers.get();
     }
 
     public String testId() {
