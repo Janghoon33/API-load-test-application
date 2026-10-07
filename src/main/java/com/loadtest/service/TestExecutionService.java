@@ -41,6 +41,7 @@ public class TestExecutionService {
     private final JvmMetricsProbe jvmMetricsProbe;
     private final ScheduledExecutorService metricSamplerScheduler;
     private final Duration sampleInterval;
+    private final Duration peakSampleInterval;
 
     public TestExecutionService(
             RunExecutorFactory runExecutorFactory,
@@ -50,7 +51,8 @@ public class TestExecutionService {
             SimpMessagingTemplate messagingTemplate,
             JvmMetricsProbe jvmMetricsProbe,
             @Qualifier("metricSamplerScheduler") ScheduledExecutorService metricSamplerScheduler,
-            @Value("${loadtest.metrics.sample-interval:1s}") Duration sampleInterval) {
+            @Value("${loadtest.metrics.sample-interval:1s}") Duration sampleInterval,
+            @Value("${loadtest.metrics.peak-sample-interval:50ms}") Duration peakSampleInterval) {
         this.runExecutorFactory = runExecutorFactory;
         this.platformThreadBudget = platformThreadBudget;
         this.httpClient = httpClient;
@@ -59,6 +61,7 @@ public class TestExecutionService {
         this.jvmMetricsProbe = jvmMetricsProbe;
         this.metricSamplerScheduler = metricSamplerScheduler;
         this.sampleInterval = sampleInterval;
+        this.peakSampleInterval = peakSampleInterval;
     }
 
     /**
@@ -111,6 +114,16 @@ public class TestExecutionService {
             }
         }, sampleInterval.toMillis(), sampleInterval.toMillis(), TimeUnit.MILLISECONDS);
 
+        // 1초 주기 샘플만으로는 그보다 짧게 끝나는 실행의 피크(PLATFORM 풀 스레드, 힙)를 놓친다.
+        // 전송 없이 피크만 읽는 관측을 짧은 주기로 따로 돌린다.
+        ScheduledFuture<?> peakObserver = metricSamplerScheduler.scheduleAtFixedRate(() -> {
+            try {
+                sampler.observePeak();
+            } catch (RuntimeException e) {
+                log.warn("[{}] 피크 관측 실패: {}", testId, e.toString());
+            }
+        }, peakSampleInterval.toMillis(), peakSampleInterval.toMillis(), TimeUnit.MILLISECONDS);
+
         List<Future<?>> workers = new ArrayList<>();
 
         try {
@@ -120,6 +133,9 @@ public class TestExecutionService {
                     final int threadId = i;
                     workers.add(executor.submit(() -> runWorker(ctx, threadId)));
                 }
+                // close()가 워커 완료를 기다리기 전에 한 번 관측한다. 이 시점에는 PLATFORM 풀이 최대 크기이므로,
+                // 아무리 짧은 실행이어도 실행 중의 값이 최소 한 번은 피크에 반영된다.
+                sampler.observePeak();
             }
         } finally {
             // 성공·실패·인터럽트 어느 경로로 끝나든 샘플러는 반드시 멈춘다
@@ -127,6 +143,7 @@ public class TestExecutionService {
                 sampling.set(false);
             }
             ticker.cancel(false);
+            peakObserver.cancel(false);
         }
 
         // submit()은 예외를 Future에 가두므로, 워커가 비정상 종료했다면 조용히 넘어가지 않고 실패로 드러낸다

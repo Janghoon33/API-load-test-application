@@ -32,6 +32,7 @@ loadtest:
   max-platform-threads: 500
   metrics:
     sample-interval: 1s
+    peak-sample-interval: 50ms
   http-client:
     connect-timeout: 10s
     request-timeout: 30s

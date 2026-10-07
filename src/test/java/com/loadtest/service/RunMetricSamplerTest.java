@@ -170,4 +170,29 @@ class RunMetricSamplerTest {
         assertThat(runtime.activeWorkers()).isEqualTo(2);
         assertThat(runtime.carrierParallelism()).isEqualTo(4);
     }
+
+    @Test
+    void observePeak는_피크만_갱신하고_이후_샘플에서도_유지된다() {
+        jvm.set(reading(900, 80, 0, 0, 0, 0));
+        sampler.observePeak();
+        jvm.set(reading(300, 15, 0, 0, 0, 0));
+
+        RuntimeSnapshot runtime = sampler.sample(START + SECOND).runtime();
+
+        assertThat(runtime.heapUsedBytes()).as("현재값은 샘플 시점 값").isEqualTo(300);
+        assertThat(runtime.peakHeapBytes()).isEqualTo(900);
+        assertThat(runtime.peakPlatformThreads()).isEqualTo(80);
+    }
+
+    @Test
+    void observePeak는_구간_상태를_소비하지_않는다() {
+        respond(100, 10);
+
+        sampler.observePeak();
+        MetricSample sample = sampler.sample(START + SECOND);
+
+        // observePeak가 구간 히스토그램을 비우거나 직전 샘플 시각을 옮겼다면 아래 값이 깨진다
+        assertThat(sample.instantTps()).isCloseTo(100.0, within(0.001));
+        assertThat(sample.intervalAvgMs()).isCloseTo(10.0, within(0.1));
+    }
 }

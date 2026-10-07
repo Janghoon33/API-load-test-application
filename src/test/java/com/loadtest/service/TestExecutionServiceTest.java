@@ -113,7 +113,7 @@ class TestExecutionServiceTest {
         recordingFactoryRef = recordingFactory;
         service = new TestExecutionService(
                 recordingFactory, platformBudget, httpClient, executionRepository, messagingTemplate,
-                new JvmMetricsProbe(new PinningMonitor(false)), samplerScheduler, SAMPLE_INTERVAL);
+                new JvmMetricsProbe(new PinningMonitor(false)), samplerScheduler, SAMPLE_INTERVAL, SAMPLE_INTERVAL);
     }
 
     @AfterEach
@@ -128,7 +128,7 @@ class TestExecutionServiceTest {
     private TestExecutionService serviceWithFailingWorkers() {
         return new TestExecutionService(
                 recordingFactoryRef, platformBudget, httpClient, executionRepository, messagingTemplate,
-                new JvmMetricsProbe(new PinningMonitor(false)), samplerScheduler, SAMPLE_INTERVAL) {
+                new JvmMetricsProbe(new PinningMonitor(false)), samplerScheduler, SAMPLE_INTERVAL, SAMPLE_INTERVAL) {
             @Override
             void executeRequest(TestRunContext ctx, int threadId, int requestId) {
                 throw new IllegalStateException("worker down");
@@ -427,6 +427,74 @@ class TestExecutionServiceTest {
         assertThat(dto.getP50Ms()).isNull();
         assertThat(dto.getPeakHeapBytes()).isNull();
         assertThat(dto.getGcCount()).isNull();
+    }
+
+    /** read() 호출 수를 세고, 플랫폼 스레드 수를 "이름이 prefix로 시작하는 살아 있는 스레드 수"로 대체하는 프로브 */
+    private static JvmMetricsProbe probeCountingThreads(String prefix, AtomicInteger reads) {
+        return new JvmMetricsProbe(new PinningMonitor(false)) {
+            @Override
+            public Reading read() {
+                reads.incrementAndGet();
+                long alive = Thread.getAllStackTraces().keySet().stream()
+                        .filter(t -> t.isAlive() && t.getName().startsWith(prefix))
+                        .count();
+                Reading real = super.read();
+                return new Reading(real.heapUsedBytes(), (int) alive, real.gcCount(), real.gcTimeMs(),
+                        real.carrierParallelism(), real.pinnedCount(), real.pinnedTimeMs());
+            }
+        };
+    }
+
+    /** read() 호출 수만 세는 가벼운 프로브 (주기 관측 횟수를 시간에 덜 민감하게 검증하기 위함) */
+    private static JvmMetricsProbe probeCountingReads(AtomicInteger reads) {
+        return new JvmMetricsProbe(new PinningMonitor(false)) {
+            @Override
+            public Reading read() {
+                reads.incrementAndGet();
+                return super.read();
+            }
+        };
+    }
+
+    private TestExecutionService serviceWith(JvmMetricsProbe probe, Duration tick, Duration peak) {
+        return new TestExecutionService(
+                recordingFactoryRef, platformBudget, httpClient, executionRepository, messagingTemplate,
+                probe, samplerScheduler, tick, peak);
+    }
+
+    @Test
+    void 주기_샘플보다_짧게_끝나는_PLATFORM_실행도_실행_중의_플랫폼_스레드_피크를_기록한다() {
+        // 틱과 피크 관측기를 모두 꺼서(1시간), "워커 기동 직후 관측"만으로 피크가 잡히는지 확인한다.
+        // 풀 스레드(pu-)는 실행이 끝나면 사라지므로 시작·종료 시점의 값만 보면 0으로 기록된다.
+        targetServer.respondWith(200, Duration.ofMillis(100));
+        TestExecutionService quick = serviceWith(
+                probeCountingThreads("pu-test-peak-platform-", new AtomicInteger()),
+                Duration.ofHours(1), Duration.ofHours(1));
+
+        TestResultDto result = quick.executeTestWithId("test-peak-platform", platformConfig(10, 1));
+
+        assertThat(result.getPeakPlatformThreads())
+                .as("풀 크기(예산 4)만큼의 워커 스레드가 실행 중에 관측되어야 한다")
+                .isGreaterThanOrEqualTo(4);
+    }
+
+    @Test
+    void 피크_관측기는_실행_중_주기적으로_읽고_실행이_끝나면_멈춘다() throws Exception {
+        targetServer.respondWith(200, Duration.ofMillis(300));
+        AtomicInteger reads = new AtomicInteger();
+        TestExecutionService observed = serviceWith(
+                probeCountingReads(reads),
+                Duration.ofHours(1), Duration.ofMillis(20));
+
+        observed.executeTestWithId("test-peak-observer", fixedCountConfig());
+
+        // 기준선 1 + 시작 샘플 1 + 기동 직후 1 + 최종 1 외에, 600ms 이상 도는 동안 20ms 주기 관측이 여러 번 있어야 한다
+        assertThat(reads.get()).as("피크 관측기가 주기적으로 읽는다").isGreaterThanOrEqualTo(10);
+
+        Thread.sleep(60); // 종료 직전에 이미 시작된 관측이 끝나도록 잠깐 기다린다
+        int settled = reads.get();
+        Thread.sleep(150);
+        assertThat(reads.get()).as("끝난 실행의 관측기가 계속 읽으면 안 된다").isEqualTo(settled);
     }
 
     @Test

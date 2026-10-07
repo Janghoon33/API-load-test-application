@@ -58,9 +58,7 @@ public final class RunMetricSampler {
         previousCompleted = completed;
 
         Reading jvm = jvmReader.get();
-        // ThreadMXBean.resetPeakThreadCount()는 JVM 전역 상태를 바꾸므로 쓰지 않고, 샘플 값의 최댓값을 직접 추적한다
-        peakHeapBytes = Math.max(peakHeapBytes, jvm.heapUsedBytes());
-        peakPlatformThreads = Math.max(peakPlatformThreads, jvm.platformThreads());
+        updatePeaks(jvm);
         RuntimeSnapshot runtime = new RuntimeSnapshot(
                 jvm.heapUsedBytes(),
                 jvm.platformThreads(),
@@ -82,6 +80,21 @@ public final class RunMetricSampler {
                 PercentilesDto.from(cumulative),
                 (nowNanos - startNanos) / 1_000_000L,
                 runtime);
+    }
+
+    /**
+     * 피크(힙, 플랫폼 스레드)만 갱신한다. 구간 히스토그램을 비우지 않고 직전 샘플 시각도 옮기지 않으므로
+     * TPS·구간 평균에 영향을 주지 않는다. 1초 주기 샘플보다 짧게 끝나는 실행에서도 실행 중의 값을 잡기 위해,
+     * 워커를 시작한 직후와 짧은 주기로 호출한다.
+     */
+    public synchronized void observePeak() {
+        updatePeaks(jvmReader.get());
+    }
+
+    private void updatePeaks(Reading jvm) {
+        // ThreadMXBean.resetPeakThreadCount()는 JVM 전역 상태를 바꾸므로 쓰지 않고, 관측한 값의 최댓값을 직접 추적한다
+        peakHeapBytes = Math.max(peakHeapBytes, jvm.heapUsedBytes());
+        peakPlatformThreads = Math.max(peakPlatformThreads, jvm.platformThreads());
     }
 
     /** 마지막 구간까지 반영한 최종 값. 모든 워커가 끝난 뒤에 호출한다. */
