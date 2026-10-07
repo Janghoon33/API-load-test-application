@@ -34,6 +34,17 @@ public class TestResultDto {
 
     private double tps; // Transactions Per Second
 
+    // 응답 시간 백분위(ms). 백분위 도입 이전에 저장된 실행은 null
+    private Double p50Ms;
+
+    private Double p90Ms;
+
+    private Double p95Ms;
+
+    private Double p99Ms;
+
+    private Double p999Ms;
+
     private Map<String, Integer> errorBreakdown; // 에러 타입별 카운트
 
     private LocalDateTime startedAt;

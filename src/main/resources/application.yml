@@ -30,6 +30,8 @@ spring.web.cors:
 loadtest:
   max-virtual-threads: 50000
   max-platform-threads: 500
+  metrics:
+    sample-interval: 1s
   http-client:
     connect-timeout: 10s
     request-timeout: 30s

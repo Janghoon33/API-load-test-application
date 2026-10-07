@@ -1,5 +1,6 @@
 package com.loadtest.service;
 
+import com.loadtest.dto.PercentilesDto;
 import com.loadtest.dto.TestConfigDto;
 import com.loadtest.dto.TestResultDto;
 import com.loadtest.dto.RealtimeMetricDto;
@@ -7,6 +8,8 @@ import com.loadtest.entity.TestExecution;
 import com.loadtest.repository.TestExecutionRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
@@ -20,6 +23,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @Slf4j
 @Service
@@ -30,18 +37,24 @@ public class TestExecutionService {
     private final HttpClient httpClient;
     private final TestExecutionRepository executionRepository;
     private final SimpMessagingTemplate messagingTemplate;
+    private final ScheduledExecutorService metricSamplerScheduler;
+    private final Duration sampleInterval;
 
     public TestExecutionService(
             RunExecutorFactory runExecutorFactory,
             PlatformThreadBudget platformThreadBudget,
             HttpClient httpClient,
             TestExecutionRepository executionRepository,
-            SimpMessagingTemplate messagingTemplate) {
+            SimpMessagingTemplate messagingTemplate,
+            @Qualifier("metricSamplerScheduler") ScheduledExecutorService metricSamplerScheduler,
+            @Value("${loadtest.metrics.sample-interval:1s}") Duration sampleInterval) {
         this.runExecutorFactory = runExecutorFactory;
         this.platformThreadBudget = platformThreadBudget;
         this.httpClient = httpClient;
         this.executionRepository = executionRepository;
         this.messagingTemplate = messagingTemplate;
+        this.metricSamplerScheduler = metricSamplerScheduler;
+        this.sampleInterval = sampleInterval;
     }
 
     /**
@@ -73,17 +86,43 @@ public class TestExecutionService {
         // 이 실행만의 상태 (카운터, 에러 집계). 서비스 필드로 두면 실행 간에 섞인다.
         TestRunContext ctx = new TestRunContext(testId, config);
 
-        // 초기 상태 전송
-        sendRealtimeMetric(ctx, 0, "RUNNING");
+        // 지표 계산·전송은 워커가 아니라 샘플러 스케줄러가 주기적으로 맡는다. 워커는 요청만 수행한다.
+        RunMetricSampler sampler = new RunMetricSampler(ctx, System.nanoTime());
+        sendRealtimeMetric(ctx, sampler.sample(System.nanoTime()), "RUNNING");
+
+        // 틱과 실행 종료가 겹쳐도 종료(COMPLETED) 뒤에 RUNNING이 늦게 도착하지 않도록 같은 락으로 직렬화한다
+        Object tickLock = new Object();
+        AtomicBoolean sampling = new AtomicBoolean(true);
+        ScheduledFuture<?> ticker = metricSamplerScheduler.scheduleAtFixedRate(() -> {
+            synchronized (tickLock) {
+                if (!sampling.get()) {
+                    return;
+                }
+                try {
+                    sendRealtimeMetric(ctx, sampler.sample(System.nanoTime()), "RUNNING");
+                } catch (RuntimeException e) {
+                    // 한 번의 전송 실패로 이후 샘플링이 영구히 멈추지 않게 한다 (예외를 던지면 주기 실행이 취소된다)
+                    log.warn("[{}] 메트릭 샘플 전송 실패: {}", testId, e.toString());
+                }
+            }
+        }, sampleInterval.toMillis(), sampleInterval.toMillis(), TimeUnit.MILLISECONDS);
 
         List<Future<?>> workers = new ArrayList<>();
 
-        // 실행마다 새 executor를 만들고, try-with-resources를 벗어날 때 close()가 모든 워커의 완료를 기다린다.
-        try (ExecutorService executor = runExecutorFactory.create(config.getThreadType(), testId, platformPermits)) {
-            for (int i = 0; i < config.getVirtualThreads(); i++) {
-                final int threadId = i;
-                workers.add(executor.submit(() -> runWorker(ctx, threadId)));
+        try {
+            // 실행마다 새 executor를 만들고, try-with-resources를 벗어날 때 close()가 모든 워커의 완료를 기다린다.
+            try (ExecutorService executor = runExecutorFactory.create(config.getThreadType(), testId, platformPermits)) {
+                for (int i = 0; i < config.getVirtualThreads(); i++) {
+                    final int threadId = i;
+                    workers.add(executor.submit(() -> runWorker(ctx, threadId)));
+                }
             }
+        } finally {
+            // 성공·실패·인터럽트 어느 경로로 끝나든 샘플러는 반드시 멈춘다
+            synchronized (tickLock) {
+                sampling.set(false);
+            }
+            ticker.cancel(false);
         }
 
         // submit()은 예외를 Future에 가두므로, 워커가 비정상 종료했다면 조용히 넘어가지 않고 실패로 드러낸다
@@ -107,18 +146,21 @@ public class TestExecutionService {
                     testId, ctx.completedCount(), ctx.totalRequests(), unfinishedWorkers));
         }
 
+        // 마지막 구간까지 반영한 최종 값 (백분위 포함)
+        MetricSample finalSample = sampler.finish(System.nanoTime());
+
         long endMillis = System.currentTimeMillis();
         LocalDateTime endTime = LocalDateTime.now();
 
         // 최종 결과 계산
-        TestResultDto result = buildResult(ctx, endTime, endMillis);
+        TestResultDto result = buildResult(ctx, finalSample.cumulative(), endTime, endMillis);
 
         // DB에 저장하고 ID 받아오기
         Long executionId = saveExecution(config, result, ctx.startedAt(), endTime);
         result.setExecutionId(executionId);
 
         // 완료 상태 전송
-        sendRealtimeMetric(ctx, ctx.totalRequests(), "COMPLETED");
+        sendRealtimeMetric(ctx, finalSample, "COMPLETED");
 
         // 최종 결과 전송
         messagingTemplate.convertAndSend("/topic/test-complete/" + testId, result);
@@ -135,38 +177,27 @@ public class TestExecutionService {
     private void runWorker(TestRunContext ctx, int threadId) {
         for (int j = 0; j < ctx.config().getRequestsPerThread(); j++) {
             executeRequest(ctx, threadId, j);
-
-            // 실시간 메트릭 전송
-            int completed = ctx.completedCount();
-
-            // 100개마다 또는 완료 시 전송
-            if (completed % 100 == 0 || completed == ctx.totalRequests()) {
-                sendRealtimeMetric(ctx, completed, "RUNNING");
-            }
         }
     }
 
     /**
      * 실시간 메트릭 전송
      */
-    private void sendRealtimeMetric(TestRunContext ctx, int completed, String status) {
-        long now = System.currentTimeMillis();
-        long elapsed = now - ctx.startMillis();
+    private void sendRealtimeMetric(TestRunContext ctx, MetricSample sample, String status) {
         int totalRequests = ctx.totalRequests();
-        double progress = totalRequests > 0 ? (completed * 100.0) / totalRequests : 0.0;
-        double currentTps = elapsed > 0 ? (completed * 1000.0) / elapsed : 0.0;
+        double progress = totalRequests > 0 ? (sample.completed() * 100.0) / totalRequests : 0.0;
 
         RealtimeMetricDto metric = RealtimeMetricDto.builder()
                 .testId(ctx.testId())
                 .totalRequests(totalRequests)
-                .completedRequests(completed)
-                .successCount(ctx.successCount())
-                .failCount(ctx.failCount())
+                .completedRequests(sample.completed())
+                .successCount(sample.success())
+                .failCount(sample.fail())
                 .progress(progress)
-                .currentTps(currentTps)
-                .avgResponseTimeMs(0)
-                .elapsedTimeMs(elapsed)
-                .timestamp(now)
+                .currentTps(sample.instantTps())
+                .avgResponseTimeMs(Math.round(sample.intervalAvgMs()))
+                .elapsedTimeMs(sample.elapsedMs())
+                .timestamp(System.currentTimeMillis())
                 .status(status)
                 .build();
 
@@ -280,7 +311,8 @@ public class TestExecutionService {
     /**
      * 결과 DTO 생성
      */
-    private TestResultDto buildResult(TestRunContext ctx, LocalDateTime endTime, long endMillis) {
+    private TestResultDto buildResult(TestRunContext ctx, PercentilesDto percentiles,
+                                      LocalDateTime endTime, long endMillis) {
         int success = ctx.successCount();
         int fail = ctx.failCount();
         int totalRequests = success + fail;
@@ -296,6 +328,11 @@ public class TestExecutionService {
                 .maxResponseTimeMs(ctx.maxResponseTimeMs())
                 .totalDurationMs(duration)
                 .tps(duration > 0 ? (totalRequests * 1000.0) / duration : 0)
+                .p50Ms(percentiles.p50())
+                .p90Ms(percentiles.p90())
+                .p95Ms(percentiles.p95())
+                .p99Ms(percentiles.p99())
+                .p999Ms(percentiles.p999())
                 .errorBreakdown(ctx.errorBreakdown())
                 .startedAt(ctx.startedAt())
                 .completedAt(endTime)

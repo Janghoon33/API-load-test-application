@@ -1,5 +1,6 @@
 package com.loadtest.service;
 
+import com.loadtest.dto.RealtimeMetricDto;
 import com.loadtest.dto.TestConfigDto;
 import com.loadtest.dto.TestResultDto;
 import com.loadtest.entity.TestExecution;
@@ -26,6 +27,7 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -37,7 +39,6 @@ import static org.assertj.core.api.Assertions.entry;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -67,6 +68,9 @@ class TestExecutionServiceTest {
     private HttpClient httpClient;
     private PlatformThreadBudget platformBudget;
     private TestExecutionService service;
+    private ScheduledExecutorService samplerScheduler;
+
+    private static final Duration SAMPLE_INTERVAL = Duration.ofMillis(100);
 
     @BeforeAll
     static void startServer() {
@@ -102,13 +106,32 @@ class TestExecutionServiceTest {
                 return executor;
             }
         };
+        samplerScheduler = Executors.newSingleThreadScheduledExecutor(
+                Thread.ofPlatform().name("metric-sampler-test").factory());
+        recordingFactoryRef = recordingFactory;
         service = new TestExecutionService(
-                recordingFactory, platformBudget, httpClient, executionRepository, messagingTemplate);
+                recordingFactory, platformBudget, httpClient, executionRepository, messagingTemplate,
+                samplerScheduler, SAMPLE_INTERVAL);
     }
 
     @AfterEach
     void tearDown() {
+        samplerScheduler.shutdownNow();
         targetServer.respondWith(200); // 다음 테스트를 위해 기본값으로 되돌림
+    }
+
+    private RunExecutorFactory recordingFactoryRef;
+
+    /** 워커가 요청을 수행하다 예외로 비정상 종료하는 서비스 (요청 실행 단계가 깨진 경우를 흉내 낸다) */
+    private TestExecutionService serviceWithFailingWorkers() {
+        return new TestExecutionService(
+                recordingFactoryRef, platformBudget, httpClient, executionRepository, messagingTemplate,
+                samplerScheduler, SAMPLE_INTERVAL) {
+            @Override
+            void executeRequest(TestRunContext ctx, int threadId, int requestId) {
+                throw new IllegalStateException("worker down");
+            }
+        };
     }
 
     @Test
@@ -240,16 +263,103 @@ class TestExecutionServiceTest {
                 .isLessThanOrEqualTo(4);
     }
 
+    /** /topic/metrics/{testId}로 나간 전송을 (전송한 스레드 이름, 상태)로 기록한다 */
+    private record MetricSend(String threadName, String status) {
+    }
+
+    private List<MetricSend> captureMetricSends(String testId) {
+        List<MetricSend> sends = new CopyOnWriteArrayList<>();
+        lenient().doAnswer(invocation -> {
+            RealtimeMetricDto dto = invocation.getArgument(1);
+            sends.add(new MetricSend(Thread.currentThread().getName(), dto.getStatus()));
+            return null;
+        }).when(messagingTemplate).convertAndSend(eq("/topic/metrics/" + testId), any(Object.class));
+        return sends;
+    }
+
+    @Test
+    void 메트릭_전송은_워커_스레드가_아니라_샘플러_스레드가_한다() {
+        // 워커당 20요청 × 30ms ≈ 600ms → 100ms 주기로 여러 번 샘플링된다
+        targetServer.respondWith(200, Duration.ofMillis(30));
+        List<MetricSend> sends = captureMetricSends("test-sampler-thread");
+
+        service.executeTestWithId("test-sampler-thread", TestConfigDto.builder()
+                .url(targetServer.url())
+                .threadType(TestConfigDto.ThreadType.VIRTUAL)
+                .virtualThreads(5)
+                .requestsPerThread(20)
+                .build());
+
+        // B4: 예전에는 워커가 completed % 100 조건을 직접 평가해 전송했다
+        assertThat(sends).extracting(MetricSend::threadName)
+                .as("워커(vu-/pu-)는 메트릭을 전송하지 않는다")
+                .noneMatch(name -> name.startsWith("vu-") || name.startsWith("pu-"));
+        assertThat(sends).extracting(MetricSend::threadName)
+                .as("주기 전송은 샘플러 스레드가 한다")
+                .contains("metric-sampler-test");
+        assertThat(sends.stream().filter(s -> s.status().equals("RUNNING")).count())
+                .as("시작 알림 1건 + 샘플 여러 건")
+                .isGreaterThanOrEqualTo(3);
+        assertThat(sends.get(sends.size() - 1).status()).isEqualTo("COMPLETED");
+    }
+
+    @Test
+    void 전송_횟수는_완료_건수가_아니라_실행_시간에_비례한다() {
+        // 요청 200건이 순식간에 끝나는 실행. 예전 방식이면 completed % 100 때문에 건수에 비례해 전송된다.
+        List<MetricSend> sends = captureMetricSends("test-send-count");
+
+        service.executeTestWithId("test-send-count", TestConfigDto.builder()
+                .url(targetServer.url())
+                .threadType(TestConfigDto.ThreadType.VIRTUAL)
+                .virtualThreads(20)
+                .requestsPerThread(10)
+                .build());
+
+        // 시작 1 + 완료 1 + (실행 시간 / 100ms)번의 샘플. 실행이 1초 미만이므로 여유를 두고 상한만 확인한다.
+        assertThat(sends.size()).isLessThan(15);
+    }
+
+    @Test
+    void 지연이_있는_대상에_대한_결과_백분위는_그_지연_근처다() {
+        targetServer.respondWith(200, Duration.ofMillis(50));
+
+        TestResultDto result = service.executeTestWithId("test-percentile", fixedCountConfig());
+
+        assertThat(result.getP50Ms()).isBetween(45.0, 200.0);
+        assertThat(result.getP99Ms()).isGreaterThanOrEqualTo(result.getP50Ms());
+        assertThat(result.getP999Ms()).isGreaterThanOrEqualTo(result.getP99Ms());
+    }
+
+    @Test
+    void 실행이_끝나면_샘플러_전송이_멈춘다() throws Exception {
+        List<MetricSend> sends = captureMetricSends("test-sampler-stop");
+        service.executeTestWithId("test-sampler-stop", fixedCountConfig());
+        int afterRun = sends.size();
+
+        Thread.sleep(SAMPLE_INTERVAL.toMillis() * 4);
+
+        assertThat(sends.size()).as("끝난 실행의 샘플러가 계속 전송하면 안 된다").isEqualTo(afterRun);
+    }
+
+    @Test
+    void 워커가_실패해도_샘플러_전송은_멈춘다() throws Exception {
+        List<MetricSend> sends = captureMetricSends("test-sampler-stop-fail");
+        assertThatThrownBy(() -> serviceWithFailingWorkers()
+                .executeTestWithId("test-sampler-stop-fail", fixedCountConfig()))
+                .isInstanceOf(IllegalStateException.class);
+        int afterRun = sends.size();
+
+        Thread.sleep(SAMPLE_INTERVAL.toMillis() * 4);
+
+        assertThat(sends.size()).isEqualTo(afterRun);
+    }
+
     @Test
     void 워커가_예외로_비정상_종료하면_조용히_넘어가지_않고_실패로_드러난다() {
-        // 첫 전송(시작 알림, 메인 스레드)은 통과시키고, 이후 워커가 보내는 진행 메트릭에서 예외를 던진다
-        doNothing().doThrow(new IllegalStateException("broker down"))
-                .when(messagingTemplate).convertAndSend(anyString(), any(Object.class));
-
-        assertThatThrownBy(() -> service.executeTestWithId("test-worker-fail", fixedCountConfig()))
+        assertThatThrownBy(() -> serviceWithFailingWorkers().executeTestWithId("test-worker-fail", fixedCountConfig()))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("test-worker-fail")
-                .hasRootCauseMessage("broker down");
+                .hasRootCauseMessage("worker down");
     }
 
     @Test
@@ -304,10 +414,7 @@ class TestExecutionServiceTest {
 
     @Test
     void 워커가_실패해도_PLATFORM_예산은_반환된다() {
-        doNothing().doThrow(new IllegalStateException("broker down"))
-                .when(messagingTemplate).convertAndSend(anyString(), any(Object.class));
-
-        assertThatThrownBy(() -> service.executeTestWithId("test-budget-fail", platformConfig(3, 2)))
+        assertThatThrownBy(() -> serviceWithFailingWorkers().executeTestWithId("test-budget-fail", platformConfig(3, 2)))
                 .isInstanceOf(IllegalStateException.class);
 
         assertThat(platformBudget.availablePermits())
