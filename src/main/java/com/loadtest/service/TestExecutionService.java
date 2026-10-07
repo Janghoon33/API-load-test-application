@@ -29,6 +29,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Slf4j
 @Service
@@ -44,6 +45,14 @@ public class TestExecutionService {
     private final ScheduledExecutorService metricSamplerScheduler;
     private final Duration sampleInterval;
     private final Duration peakSampleInterval;
+
+    // JFR 핀닝 이벤트 전달을 확정하지 못한 채 끝난 실행(실패·중단·시간 초과)의 횟수.
+    // 그런 실행의 지연 이벤트가 다음 실행의 기준선 뒤에 도착하면 다음 실행의 핀닝으로 잘못 집계되므로,
+    // 다음 실행은 기준선을 읽기 전에 전달을 확정한다. 불리언이 아니라 횟수로 두는 이유는, 확정을 기다리는 동안
+    // 새로 확정 없이 끝난 실행이 생겨도 표시가 지워지지 않게 하기 위해서다.
+    private final AtomicLong unsettledRuns = new AtomicLong();
+    private volatile long settledRuns;
+    private final Object settleLock = new Object();
 
     public TestExecutionService(
             RunExecutorFactory runExecutorFactory,
@@ -88,7 +97,14 @@ public class TestExecutionService {
         int platformPermits = platformThreadBudget.acquireFor(config);
         FinishedRun finished;
         try {
+            // 직전 실행이 전달 확정 없이 끝났다면 기준선(= TestRunContext 생성, 시작 시각)을 잡기 전에 확정한다.
+            // 예산을 획득한 뒤에 해야 예산을 기다리는 사이에 앞 실행이 실패해도 놓치지 않는다.
+            settlePreviousRuns();
             finished = runWorkers(testId, config, platformPermits);
+        } catch (Throwable t) {
+            // 워커 실패·중단·일부만 수행 등으로 결과를 만들지 못한 실행은 전달을 확정하지 않고 끝난다
+            unsettledRuns.incrementAndGet();
+            throw t;
         } finally {
             platformThreadBudget.release(platformPermits);
         }
@@ -96,9 +112,32 @@ public class TestExecutionService {
         return complete(testId, config, finished);
     }
 
-    /** 워커가 모두 끝난 시점의 실행 상태. 종료 시각은 이후의 전달 확정 대기가 섞이지 않도록 여기서 확정한다. */
-    private record FinishedRun(TestRunContext ctx, RunMetricSampler sampler,
-                               long endNanos, long endMillis, LocalDateTime endTime) {
+    /**
+     * 전달 확정 없이 끝난 실행이 있으면 지금 확정한다. 정상 흐름에서는 두 값을 비교하고 바로 돌아온다.
+     * 락으로 직렬화하므로 동시에 시작하는 실행들도 확정이 끝나기 전에 기준선을 읽지 않는다.
+     * 확정에 실패하면(시간 초과) 다음 실행이 다시 시도한다.
+     */
+    private void settlePreviousRuns() {
+        if (unsettledRuns.get() == settledRuns) {
+            return;
+        }
+        synchronized (settleLock) {
+            long target = unsettledRuns.get();
+            if (target == settledRuns) {
+                return; // 먼저 들어온 실행이 이미 확정했다
+            }
+            if (!pinningMonitor.isRunning() || pinningMonitor.awaitDelivery()) {
+                settledRuns = target;
+            }
+        }
+    }
+
+    /**
+     * 워커가 모두 끝난 시점의 실행 상태. 종료 시각과 최종 샘플(백분위·GC·힙·스레드)은 이후의 전달 확정 대기가
+     * 섞이지 않도록 여기서 확정한다. 대기 뒤에는 핀닝만 다시 읽는다({@link RunMetricSampler#refreshPinning}).
+     */
+    private record FinishedRun(TestRunContext ctx, RunMetricSampler sampler, MetricSample endSample,
+                               long endMillis, LocalDateTime endTime) {
     }
 
     private FinishedRun runWorkers(String testId, TestConfigDto config, int platformPermits) {
@@ -179,8 +218,13 @@ public class TestExecutionService {
                     testId, ctx.completedCount(), ctx.totalRequests(), unfinishedWorkers));
         }
 
-        // 대기 시간이 소요 시간·TPS에 섞이지 않도록 종료 시각은 전달 확정을 기다리기 전에 확정한다
-        return new FinishedRun(ctx, sampler, System.nanoTime(), System.currentTimeMillis(), LocalDateTime.now());
+        // 종료 시각과 최종 샘플은 전달 확정을 기다리기 전에 확정한다. 대기 시간이 소요 시간·TPS뿐 아니라
+        // 대기 중에 달라지는 GC·힙·스레드 값에도 섞이지 않게 하기 위해서다.
+        long endNanos = System.nanoTime();
+        long endMillis = System.currentTimeMillis();
+        LocalDateTime endTime = LocalDateTime.now();
+        MetricSample endSample = sampler.finish(endNanos);
+        return new FinishedRun(ctx, sampler, endSample, endMillis, endTime);
     }
 
     /**
@@ -195,12 +239,13 @@ public class TestExecutionService {
         long endMillis = finished.endMillis();
         LocalDateTime endTime = finished.endTime();
 
-        if (pinningMonitor.isRunning()) {
-            pinningMonitor.awaitDelivery();
+        if (pinningMonitor.isRunning() && !pinningMonitor.awaitDelivery()) {
+            // 제한 시간 안에 확정하지 못했다. 늦게 도착할 이벤트가 다음 실행에 섞이지 않도록 다음 실행이 먼저 확정한다.
+            unsettledRuns.incrementAndGet();
         }
 
-        // 마지막 구간까지 반영한 최종 값 (백분위 포함)
-        MetricSample finalSample = finished.sampler().finish(finished.endNanos());
+        // 핀닝만 전달 확정 후의 값으로 갱신하고, GC·힙·스레드 등은 워커 종료 시점 값을 유지한다
+        MetricSample finalSample = finished.sampler().refreshPinning(finished.endSample());
 
         // 최종 결과 계산
         TestResultDto result = buildResult(ctx, finalSample, endTime, endMillis);

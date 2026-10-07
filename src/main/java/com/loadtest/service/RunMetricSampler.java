@@ -97,6 +97,38 @@ public final class RunMetricSampler {
         peakPlatformThreads = Math.max(peakPlatformThreads, jvm.platformThreads());
     }
 
+    /**
+     * 이미 확정한 최종 샘플에서 <b>핀닝 수치만</b> 지금 값으로 다시 계산한 새 샘플을 돌려준다.
+     * <p>
+     * 핀닝은 JFR 이벤트가 늦게 전달되어 워커 종료 뒤에 전달 확정을 기다린 다음에야 정확해진다. 반면 GC·힙·스레드는
+     * 그 대기 동안의 변화를 이 실행의 몫으로 섞으면 안 되므로 워커 종료 시점의 값을 유지한다.
+     * 그래서 {@link #finish(long)}는 워커 종료 직후에 호출하고, 대기가 끝난 뒤에는 이 메서드로 핀닝만 갱신한다.
+     */
+    public MetricSample refreshPinning(MetricSample sample) {
+        Reading jvm = jvmReader.get();
+        RuntimeSnapshot before = sample.runtime();
+        RuntimeSnapshot runtime = new RuntimeSnapshot(
+                before.heapUsedBytes(),
+                before.platformThreads(),
+                before.activeWorkers(),
+                before.carrierParallelism(),
+                before.peakHeapBytes(),
+                before.peakPlatformThreads(),
+                before.gcCount(),
+                before.gcTimeMs(),
+                jvm.pinnedCount() - baseline.pinnedCount(),
+                jvm.pinnedTimeMs() - baseline.pinnedTimeMs());
+        return new MetricSample(
+                sample.completed(),
+                sample.success(),
+                sample.fail(),
+                sample.instantTps(),
+                sample.intervalAvgMs(),
+                sample.cumulative(),
+                sample.elapsedMs(),
+                runtime);
+    }
+
     /** 마지막 구간까지 반영한 최종 값. 모든 워커가 끝난 뒤에 호출한다. */
     public MetricSample finish(long nowNanos) {
         return sample(nowNanos);

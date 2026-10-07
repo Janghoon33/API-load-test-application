@@ -617,6 +617,45 @@ class TestExecutionServiceTest {
     }
 
     @Test
+    void 최종_결과의_GC_힙_스레드는_워커_종료_시점_값이고_핀닝만_확정_후_값이다() {
+        FakePinningMonitor monitor = new FakePinningMonitor(true);
+        AtomicBoolean waited = new AtomicBoolean();
+        monitor.onAwait = () -> waited.set(true);
+        // 실제 JVM 값은 실행 중에도 흔들리므로, 대기 전/후 값을 고정한 프로브로 결정적으로 검증한다.
+        // 대기 이후에는 GC·힙·스레드가 크게 달라진 것으로 흉내 낸다.
+        JvmMetricsProbe probe = new JvmMetricsProbe(monitor) {
+            @Override
+            public Reading read() {
+                PinningMonitor.Snapshot pin = monitor.snapshot();
+                boolean late = waited.get();
+                return new Reading(late ? 999_999L : 1_000L, late ? 210 : 10, late ? 8 : 3, late ? 80 : 30,
+                        4, pin.count(), pin.totalMillis());
+            }
+        };
+        TestExecutionService svc = new TestExecutionService(
+                recordingFactoryRef, platformBudget, httpClient, executionRepository, messagingTemplate,
+                probe, monitor, samplerScheduler, SAMPLE_INTERVAL, SAMPLE_INTERVAL);
+        java.util.concurrent.atomic.AtomicReference<RealtimeMetricDto> completed = new java.util.concurrent.atomic.AtomicReference<>();
+        lenient().doAnswer(invocation -> {
+            RealtimeMetricDto dto = invocation.getArgument(1);
+            if ("COMPLETED".equals(dto.getStatus())) {
+                completed.set(dto);
+            }
+            return null;
+        }).when(messagingTemplate).convertAndSend(eq("/topic/metrics/test-final-runtime"), any(Object.class));
+
+        TestResultDto result = svc.executeTestWithId("test-final-runtime", fixedCountConfig());
+
+        assertThat(result.getGcCount()).as("대기 중 발생한 GC가 이 실행의 몫으로 섞이면 안 된다").isZero();
+        assertThat(result.getGcTimeMs()).isZero();
+        assertThat(result.getPeakHeapBytes()).isEqualTo(1_000L);
+        assertThat(result.getPeakPlatformThreads()).isEqualTo(10);
+        assertThat(result.getPinnedCount()).as("핀닝만 전달 확정 후의 값").isEqualTo(3);
+        assertThat(completed.get().getHeapUsedBytes()).isEqualTo(1_000L);
+        assertThat(completed.get().getPlatformThreadCount()).isEqualTo(10);
+    }
+
+    @Test
     void 꺼진_모니터는_전달_확정을_기다리지_않는다() {
         FakePinningMonitor monitor = new FakePinningMonitor(false);
 
@@ -656,6 +695,127 @@ class TestExecutionServiceTest {
         assertThat(events.subList(await + 1, events.size()))
                 .as("대기 이후에는 COMPLETED 하나만 온다")
                 .containsExactly("COMPLETED");
+    }
+
+    /** 같은 인스턴스를 유지한 채 요청 실행 단계의 실패를 켜고 끌 수 있는 서비스 (실행 간 상태 공유 검증용) */
+    private TestExecutionService serviceFailingWhen(FakePinningMonitor monitor, AtomicBoolean failNow) {
+        return new TestExecutionService(
+                recordingFactoryRef, platformBudget, httpClient, executionRepository, messagingTemplate,
+                new JvmMetricsProbe(monitor), monitor, samplerScheduler, SAMPLE_INTERVAL, SAMPLE_INTERVAL) {
+            @Override
+            void executeRequest(TestRunContext ctx, int threadId, int requestId) {
+                if (failNow.get()) {
+                    throw new IllegalStateException("worker down");
+                }
+                super.executeRequest(ctx, threadId, requestId);
+            }
+        };
+    }
+
+    @Test
+    void 확정_없이_끝난_실행의_지연_핀닝이_다음_실행에_귀속되지_않는다() {
+        FakePinningMonitor monitor = new FakePinningMonitor(true);
+        AtomicBoolean failNow = new AtomicBoolean(true);
+        TestExecutionService svc = serviceFailingWhen(monitor, failNow);
+
+        // 1회차: 워커가 실패해 전달 확정 없이 끝난다 → 이 실행의 지연 이벤트(3건)가 아직 도착하지 않은 상태
+        assertThatThrownBy(() -> svc.executeTestWithId("test-leak-1", fixedCountConfig()))
+                .isInstanceOf(IllegalStateException.class);
+        assertThat(monitor.awaitCalls.get()).isZero();
+
+        failNow.set(false);
+        TestResultDto second = svc.executeTestWithId("test-leak-2", fixedCountConfig());
+
+        // 시작 전에 확정하지 않으면 기준선은 0, 종료 확정 후 값은 3이라 1회차의 핀닝이 2회차의 것으로 기록된다
+        assertThat(second.getPinnedCount()).as("1회차의 핀닝이 2회차에 섞이면 안 된다").isZero();
+        assertThat(second.getPinnedTimeMs()).isZero();
+    }
+
+    @Test
+    void 정상_종료한_실행_뒤에는_시작_전_전달_확정을_기다리지_않는다() {
+        FakePinningMonitor monitor = new FakePinningMonitor(true);
+        TestExecutionService svc = serviceWithMonitor(monitor);
+
+        svc.executeTestWithId("test-clean-1", fixedCountConfig());
+        svc.executeTestWithId("test-clean-2", fixedCountConfig());
+
+        assertThat(monitor.awaitCalls.get())
+                .as("실행마다 종료 시점에 한 번씩만 기다린다. 정상 흐름에 지연을 더하면 안 된다")
+                .isEqualTo(2);
+    }
+
+    @Test
+    void 전달_확정이_시간_초과된_실행_뒤에는_다음_실행이_시작_전에_다시_확정한다() {
+        FakePinningMonitor monitor = new FakePinningMonitor(true);
+        monitor.confirm = false;
+        TestExecutionService svc = serviceWithMonitor(monitor);
+
+        svc.executeTestWithId("test-timeout-1", fixedCountConfig());   // 종료 시 1회 (확정 실패)
+        assertThat(monitor.awaitCalls.get()).isEqualTo(1);
+        svc.executeTestWithId("test-timeout-2", fixedCountConfig());   // 시작 전 1회 + 종료 시 1회
+
+        assertThat(monitor.awaitCalls.get()).isEqualTo(3);
+    }
+
+    @Test
+    void 시작_전_전달_확정은_시작_시각_이전이고_소요_시간에_섞이지_않는다() {
+        FakePinningMonitor monitor = new FakePinningMonitor(true);
+        AtomicBoolean failNow = new AtomicBoolean(true);
+        TestExecutionService svc = serviceFailingWhen(monitor, failNow);
+        assertThatThrownBy(() -> svc.executeTestWithId("test-start-wait-1", fixedCountConfig()))
+                .isInstanceOf(IllegalStateException.class);
+
+        java.util.concurrent.atomic.AtomicReference<java.time.LocalDateTime> firstWaitDone =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        monitor.onAwait = () -> {
+            try {
+                Thread.sleep(300);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            firstWaitDone.compareAndSet(null, java.time.LocalDateTime.now());
+        };
+        failNow.set(false);
+
+        TestResultDto result = svc.executeTestWithId("test-start-wait-2", fixedCountConfig());
+
+        assertThat(result.getStartedAt()).as("시작 시각은 시작 전 확정이 끝난 뒤여야 한다")
+                .isAfterOrEqualTo(firstWaitDone.get());
+        assertThat(result.getTotalDurationMs()).as("시작 전 대기가 소요 시간·TPS에 섞이면 안 된다").isLessThan(300);
+    }
+
+    @Test
+    void 시작_전_전달_확정은_PLATFORM_예산을_획득한_뒤에_한다() {
+        FakePinningMonitor monitor = new FakePinningMonitor(true);
+        AtomicBoolean failNow = new AtomicBoolean(true);
+        TestExecutionService svc = serviceFailingWhen(monitor, failNow);
+        assertThatThrownBy(() -> svc.executeTestWithId("test-start-permits-1", platformConfig(3, 2)))
+                .isInstanceOf(IllegalStateException.class);
+
+        List<Integer> permitsAtAwait = new CopyOnWriteArrayList<>();
+        monitor.onAwait = () -> permitsAtAwait.add(platformBudget.availablePermits());
+        failNow.set(false);
+
+        svc.executeTestWithId("test-start-permits-2", platformConfig(3, 2));
+
+        // [시작 전 확정, 종료 시 확정]. 시작 전 확정은 예산을 이미 획득한 뒤(예산 미획득 시점이면 4)여야 한다.
+        assertThat(permitsAtAwait).hasSize(2);
+        assertThat(permitsAtAwait.get(0)).as("시작 전 확정은 예산 획득 이후").isLessThan(4);
+        assertThat(permitsAtAwait.get(1)).as("종료 시 확정은 예산 반환 이후").isEqualTo(4);
+    }
+
+    @Test
+    void 꺼진_모니터는_실패한_실행_뒤에도_기다리지_않는다() {
+        FakePinningMonitor monitor = new FakePinningMonitor(false);
+        AtomicBoolean failNow = new AtomicBoolean(true);
+        TestExecutionService svc = serviceFailingWhen(monitor, failNow);
+        assertThatThrownBy(() -> svc.executeTestWithId("test-off-1", fixedCountConfig()))
+                .isInstanceOf(IllegalStateException.class);
+        failNow.set(false);
+
+        svc.executeTestWithId("test-off-2", fixedCountConfig());
+
+        assertThat(monitor.awaitCalls.get()).isZero();
     }
 
     @Test

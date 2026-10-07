@@ -195,4 +195,42 @@ class RunMetricSamplerTest {
         assertThat(sample.instantTps()).isCloseTo(100.0, within(0.001));
         assertThat(sample.intervalAvgMs()).isCloseTo(10.0, within(0.1));
     }
+
+    @Test
+    void refreshPinning은_핀닝_증가분만_새_값으로_바꾸고_나머지는_종료_시점_값을_유지한다() {
+        respond(10, 10);
+        jvm.set(reading(500, 20, 2, 20, 1, 10));
+        MetricSample end = sampler.finish(START + SECOND);
+
+        // 종료 후 전달 확정을 기다리는 동안 JVM 값이 바뀌었다 (GC·힙·스레드 변화, 늦게 도착한 핀닝)
+        jvm.set(reading(900, 80, 9, 95, 7, 70));
+        MetricSample refreshed = sampler.refreshPinning(end);
+
+        RuntimeSnapshot runtime = refreshed.runtime();
+        assertThat(runtime.pinnedCount()).as("핀닝은 확정 후 값 (기준선 0 대비)").isEqualTo(7);
+        assertThat(runtime.pinnedTimeMs()).isEqualTo(70);
+        assertThat(runtime.heapUsedBytes()).as("대기 중 값이 섞이면 안 된다").isEqualTo(500);
+        assertThat(runtime.platformThreads()).isEqualTo(20);
+        assertThat(runtime.gcCount()).isEqualTo(2);
+        assertThat(runtime.gcTimeMs()).isEqualTo(20);
+        assertThat(runtime.peakHeapBytes()).isEqualTo(500);
+        assertThat(runtime.peakPlatformThreads()).isEqualTo(20);
+        assertThat(refreshed.completed()).isEqualTo(end.completed());
+        assertThat(refreshed.cumulative()).isEqualTo(end.cumulative());
+        assertThat(refreshed.instantTps()).isEqualTo(end.instantTps());
+        assertThat(refreshed.elapsedMs()).isEqualTo(end.elapsedMs());
+    }
+
+    @Test
+    void refreshPinning은_원본_샘플을_바꾸지_않는다() {
+        jvm.set(reading(500, 20, 2, 20, 1, 10));
+        MetricSample end = sampler.finish(START + SECOND);
+        jvm.set(reading(900, 80, 9, 95, 7, 70));
+
+        MetricSample refreshed = sampler.refreshPinning(end);
+
+        assertThat(refreshed).isNotSameAs(end);
+        assertThat(end.runtime().pinnedCount()).isEqualTo(1);
+        assertThat(end.runtime().pinnedTimeMs()).isEqualTo(10);
+    }
 }
