@@ -35,6 +35,44 @@ class TestExecutionRepositoryTest extends PostgresTestBase {
                 .containsExactly("http://b", "http://c", "http://a");
     }
 
+    @Test
+    void 백분위와_런타임_지표가_저장되고_다시_읽힌다() {
+        TestExecution toSave = execution("http://metrics", LocalDateTime.now());
+        toSave.setP50Ms(12.5);
+        toSave.setP90Ms(20.0);
+        toSave.setP95Ms(25.0);
+        toSave.setP99Ms(30.0);
+        toSave.setP999Ms(31.5);
+        toSave.setPeakHeapBytes(123_456_789L);
+        toSave.setPeakPlatformThreads(42);
+        toSave.setGcCount(3L);
+        toSave.setGcTimeMs(17L);
+        toSave.setPinnedCount(0L);
+        toSave.setPinnedTimeMs(0L);
+        Long id = repository.saveAndFlush(toSave).getId();
+
+        TestExecution found = repository.findById(id).orElseThrow();
+
+        assertThat(found.getP50Ms()).isEqualTo(12.5);
+        assertThat(found.getP999Ms()).isEqualTo(31.5);
+        assertThat(found.getPeakHeapBytes()).isEqualTo(123_456_789L);
+        assertThat(found.getPeakPlatformThreads()).isEqualTo(42);
+        assertThat(found.getGcCount()).isEqualTo(3L);
+        assertThat(found.getGcTimeMs()).isEqualTo(17L);
+        assertThat(found.getPinnedCount()).isZero();
+    }
+
+    @Test
+    void 새_지표가_없는_이력도_저장되고_null로_읽힌다() {
+        Long id = repository.saveAndFlush(execution("http://legacy", LocalDateTime.now())).getId();
+
+        TestExecution found = repository.findById(id).orElseThrow();
+
+        assertThat(found.getP50Ms()).isNull();
+        assertThat(found.getPeakHeapBytes()).isNull();
+        assertThat(found.getPinnedCount()).isNull();
+    }
+
     private TestExecution execution(String url, LocalDateTime startedAt) {
         return TestExecution.builder()
                 .url(url)

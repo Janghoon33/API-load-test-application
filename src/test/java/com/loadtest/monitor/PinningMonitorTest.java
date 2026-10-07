@@ -74,4 +74,99 @@ class PinningMonitorTest {
         assertThat(diff.totalMillis()).isEqualTo(20);
         assertThat(diff.stacks()).containsEntry("a", 1L).containsEntry("b", 2L);
     }
+
+    private static void pinOnce() throws InterruptedException {
+        Thread virtualThread = Thread.ofVirtual().start(() -> {
+            synchronized (LOCK) {
+                try {
+                    Thread.sleep(100);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        });
+        virtualThread.join();
+    }
+
+    @Test
+    @EnabledForJreRange(min = JRE.JAVA_21, max = JRE.JAVA_23)
+    void awaitDelivery는_직전에_발생한_핀닝이_스냅샷에_반영된_뒤_돌아온다() throws Exception {
+        PinningMonitor monitor = new PinningMonitor(true);
+        monitor.start();
+        try {
+            // 폴링 없이 awaitDelivery만으로 도착이 확정되는지 3번 반복해서 본다 (실행 종료 시 최종 결과를 만드는 상황과 같다)
+            for (int trial = 1; trial <= 3; trial++) {
+                long before = monitor.snapshot().count();
+
+                pinOnce();
+                boolean settled = monitor.awaitDelivery(Duration.ofSeconds(5));
+
+                assertThat(settled).as("시도 %d: 제한 시간 안에 확정되어야 한다", trial).isTrue();
+                assertThat(monitor.snapshot().count())
+                        .as("시도 %d: awaitDelivery가 돌아온 시점에 방금의 핀닝이 이미 집계되어 있어야 한다", trial)
+                        .isGreaterThan(before);
+            }
+        } finally {
+            monitor.stop();
+        }
+    }
+
+    @Test
+    void 이벤트가_없어도_awaitDelivery는_제한_시간_안에_돌아온다() throws Exception {
+        PinningMonitor monitor = new PinningMonitor(true);
+        monitor.start();
+        try {
+            long startNanos = System.nanoTime();
+
+            boolean settled = monitor.awaitDelivery(Duration.ofSeconds(6));
+
+            long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
+            assertThat(settled).as("이벤트가 없어도 플러시는 주기적으로 일어나야 한다").isTrue();
+            assertThat(elapsedMs).as("플러시 몇 회 분량만 기다린다").isLessThan(5_000);
+        } finally {
+            monitor.stop();
+        }
+    }
+
+    @Test
+    void 꺼진_모니터의_awaitDelivery는_기다리지_않고_즉시_돌아온다() {
+        PinningMonitor monitor = new PinningMonitor(false);
+        monitor.start();
+
+        long startNanos = System.nanoTime();
+        boolean settled = monitor.awaitDelivery(Duration.ofSeconds(5));
+
+        assertThat(settled).as("기다릴 것이 없으므로 확정으로 본다").isTrue();
+        assertThat((System.nanoTime() - startNanos) / 1_000_000).isLessThan(200);
+    }
+
+    @Test
+    void 제한_시간이_0이면_기다리지_않고_확정되지_않았다고_알린다() {
+        PinningMonitor monitor = new PinningMonitor(true);
+        monitor.start();
+        try {
+            long startNanos = System.nanoTime();
+
+            assertThat(monitor.awaitDelivery(Duration.ZERO)).isFalse();
+            assertThat((System.nanoTime() - startNanos) / 1_000_000).isLessThan(200);
+        } finally {
+            monitor.stop();
+        }
+    }
+
+    @Test
+    void awaitDelivery는_인터럽트되면_플래그를_복원하고_돌아온다() {
+        PinningMonitor monitor = new PinningMonitor(true);
+        monitor.start();
+        try {
+            Thread.currentThread().interrupt();
+
+            boolean settled = monitor.awaitDelivery(Duration.ofSeconds(5));
+
+            assertThat(settled).isFalse();
+            assertThat(Thread.interrupted()).as("인터럽트 플래그가 복원되어야 상위에서 중단을 알 수 있다").isTrue();
+        } finally {
+            monitor.stop();
+        }
+    }
 }

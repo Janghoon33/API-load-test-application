@@ -1,5 +1,6 @@
 package com.loadtest.service;
 
+import com.loadtest.dto.PercentilesDto;
 import com.loadtest.dto.TestConfigDto;
 import org.junit.jupiter.api.Test;
 
@@ -11,6 +12,7 @@ import java.util.concurrent.Executors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.entry;
+import static org.assertj.core.api.Assertions.within;
 
 class TestRunContextTest {
 
@@ -40,6 +42,77 @@ class TestRunContextTest {
         assertThat(ctx.minResponseTimeMs()).isEqualTo(10);
         assertThat(ctx.maxResponseTimeMs()).isEqualTo(30);
         assertThat(ctx.completedCount()).isEqualTo(3);
+    }
+
+    @Test
+    void 기록한_지연으로_백분위를_계산한다() {
+        TestRunContext ctx = newContext();
+        for (int ms = 1; ms <= 100; ms++) {
+            ctx.recordResponse(ms);
+        }
+
+        PercentilesDto p = PercentilesDto.from(ctx.drainInterval());
+
+        // HdrHistogram 유효숫자 3자리 범위 안의 오차만 허용
+        assertThat(p.p50()).isCloseTo(50.0, within(0.2));
+        assertThat(p.p90()).isCloseTo(90.0, within(0.2));
+        assertThat(p.p95()).isCloseTo(95.0, within(0.2));
+        assertThat(p.p99()).isCloseTo(99.0, within(0.2));
+        assertThat(p.p999()).isCloseTo(100.0, within(0.2));
+    }
+
+    @Test
+    void 나노초_단위로_기록해도_1ms_미만_지연이_구분된다() {
+        TestRunContext ctx = newContext();
+        ctx.recordResponseNanos(250_000);
+
+        PercentilesDto p = PercentilesDto.from(ctx.drainInterval());
+
+        assertThat(p.p50()).isCloseTo(0.25, within(0.001));
+    }
+
+    @Test
+    void 기록_범위를_넘는_지연도_예외_없이_최대값으로_기록된다() {
+        TestRunContext ctx = newContext();
+
+        ctx.recordResponse(10 * 60 * 1000);
+
+        PercentilesDto p = PercentilesDto.from(ctx.drainInterval());
+        assertThat(p.p99()).isCloseTo(60_000.0, within(100.0));
+        assertThat(ctx.completedCount()).isEqualTo(1);
+    }
+
+    @Test
+    void 응답이_없으면_백분위는_모두_0이다() {
+        PercentilesDto p = PercentilesDto.from(newContext().drainInterval());
+
+        assertThat(p).isEqualTo(new PercentilesDto(0, 0, 0, 0, 0));
+    }
+
+    @Test
+    void 구간_히스토그램은_직전_drain_이후_기록분만_담는다() {
+        TestRunContext ctx = newContext();
+        ctx.recordResponse(10);
+        ctx.recordResponse(20);
+        assertThat(ctx.drainInterval().getTotalCount()).isEqualTo(2);
+
+        ctx.recordResponse(30);
+
+        assertThat(ctx.drainInterval().getTotalCount()).isEqualTo(1);
+        assertThat(ctx.drainInterval().getTotalCount()).isZero();
+    }
+
+    @Test
+    void 활성_워커_수는_시작과_종료에_따라_증감한다() {
+        TestRunContext ctx = newContext();
+        assertThat(ctx.activeWorkers()).isZero();
+
+        ctx.workerStarted();
+        ctx.workerStarted();
+        assertThat(ctx.activeWorkers()).isEqualTo(2);
+
+        ctx.workerFinished();
+        assertThat(ctx.activeWorkers()).isEqualTo(1);
     }
 
     @Test

@@ -1,8 +1,11 @@
 package com.loadtest.service;
 
+import com.loadtest.dto.RealtimeMetricDto;
 import com.loadtest.dto.TestConfigDto;
 import com.loadtest.dto.TestResultDto;
 import com.loadtest.entity.TestExecution;
+import com.loadtest.monitor.JvmMetricsProbe;
+import com.loadtest.monitor.PinningMonitor;
 import com.loadtest.repository.TestExecutionRepository;
 import com.loadtest.support.FakeTargetServer;
 import ch.qos.logback.classic.Level;
@@ -26,6 +29,7 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -37,7 +41,6 @@ import static org.assertj.core.api.Assertions.entry;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -67,6 +70,11 @@ class TestExecutionServiceTest {
     private HttpClient httpClient;
     private PlatformThreadBudget platformBudget;
     private TestExecutionService service;
+    private ScheduledExecutorService samplerScheduler;
+    /** 꺼진 모니터: 실행 종료 시 전달 확정을 기다리지 않으므로 기존 테스트의 소요 시간이 늘지 않는다 */
+    private final PinningMonitor offMonitor = new PinningMonitor(false);
+
+    private static final Duration SAMPLE_INTERVAL = Duration.ofMillis(100);
 
     @BeforeAll
     static void startServer() {
@@ -102,13 +110,37 @@ class TestExecutionServiceTest {
                 return executor;
             }
         };
+        samplerScheduler = Executors.newSingleThreadScheduledExecutor(
+                Thread.ofPlatform().name("metric-sampler-test").factory());
+        recordingFactoryRef = recordingFactory;
         service = new TestExecutionService(
-                recordingFactory, platformBudget, httpClient, executionRepository, messagingTemplate);
+                recordingFactory, platformBudget, httpClient, executionRepository, messagingTemplate,
+                new JvmMetricsProbe(offMonitor), offMonitor, samplerScheduler, SAMPLE_INTERVAL, SAMPLE_INTERVAL);
     }
 
     @AfterEach
     void tearDown() {
-        targetServer.respondWith(200); // 다음 테스트를 위해 기본값으로 되돌림
+        samplerScheduler.shutdownNow();
+        // 다음 테스트를 위해 기본값으로 되돌림. 상태코드만 바꾸는 respondWith(200)은 앞 테스트의 지연을 남기므로 지연도 함께 초기화한다.
+        targetServer.respondWith(200, Duration.ZERO);
+    }
+
+    private RunExecutorFactory recordingFactoryRef;
+
+    /** 워커가 요청을 수행하다 예외로 비정상 종료하는 서비스 (요청 실행 단계가 깨진 경우를 흉내 낸다) */
+    private TestExecutionService serviceWithFailingWorkers() {
+        return serviceWithFailingWorkers(offMonitor);
+    }
+
+    private TestExecutionService serviceWithFailingWorkers(PinningMonitor monitor) {
+        return new TestExecutionService(
+                recordingFactoryRef, platformBudget, httpClient, executionRepository, messagingTemplate,
+                new JvmMetricsProbe(monitor), monitor, samplerScheduler, SAMPLE_INTERVAL, SAMPLE_INTERVAL) {
+            @Override
+            void executeRequest(TestRunContext ctx, int threadId, int requestId) {
+                throw new IllegalStateException("worker down");
+            }
+        };
     }
 
     @Test
@@ -240,16 +272,433 @@ class TestExecutionServiceTest {
                 .isLessThanOrEqualTo(4);
     }
 
+    /** /topic/metrics/{testId}로 나간 전송을 (전송한 스레드 이름, 상태)로 기록한다 */
+    private record MetricSend(String threadName, String status) {
+    }
+
+    private List<MetricSend> captureMetricSends(String testId) {
+        List<MetricSend> sends = new CopyOnWriteArrayList<>();
+        lenient().doAnswer(invocation -> {
+            RealtimeMetricDto dto = invocation.getArgument(1);
+            sends.add(new MetricSend(Thread.currentThread().getName(), dto.getStatus()));
+            return null;
+        }).when(messagingTemplate).convertAndSend(eq("/topic/metrics/" + testId), any(Object.class));
+        return sends;
+    }
+
+    @Test
+    void 메트릭_전송은_워커_스레드가_아니라_샘플러_스레드가_한다() {
+        // 워커당 20요청 × 30ms ≈ 600ms → 100ms 주기로 여러 번 샘플링된다
+        targetServer.respondWith(200, Duration.ofMillis(30));
+        List<MetricSend> sends = captureMetricSends("test-sampler-thread");
+
+        service.executeTestWithId("test-sampler-thread", TestConfigDto.builder()
+                .url(targetServer.url())
+                .threadType(TestConfigDto.ThreadType.VIRTUAL)
+                .virtualThreads(5)
+                .requestsPerThread(20)
+                .build());
+
+        // B4: 예전에는 워커가 completed % 100 조건을 직접 평가해 전송했다
+        assertThat(sends).extracting(MetricSend::threadName)
+                .as("워커(vu-/pu-)는 메트릭을 전송하지 않는다")
+                .noneMatch(name -> name.startsWith("vu-") || name.startsWith("pu-"));
+        assertThat(sends).extracting(MetricSend::threadName)
+                .as("주기 전송은 샘플러 스레드가 한다")
+                .contains("metric-sampler-test");
+        assertThat(sends.stream().filter(s -> s.status().equals("RUNNING")).count())
+                .as("시작 알림 1건 + 샘플 여러 건")
+                .isGreaterThanOrEqualTo(3);
+        assertThat(sends.get(sends.size() - 1).status()).isEqualTo("COMPLETED");
+    }
+
+    @Test
+    void 전송_횟수는_완료_건수가_아니라_실행_시간에_비례한다() {
+        // 요청 200건이 순식간에 끝나는 실행. 예전 방식이면 completed % 100 때문에 건수에 비례해 전송된다.
+        List<MetricSend> sends = captureMetricSends("test-send-count");
+
+        service.executeTestWithId("test-send-count", TestConfigDto.builder()
+                .url(targetServer.url())
+                .threadType(TestConfigDto.ThreadType.VIRTUAL)
+                .virtualThreads(20)
+                .requestsPerThread(10)
+                .build());
+
+        // 시작 1 + 완료 1 + (실행 시간 / 100ms)번의 샘플. 실행이 1초 미만이므로 여유를 두고 상한만 확인한다.
+        assertThat(sends.size()).isLessThan(15);
+    }
+
+    @Test
+    void 지연이_있는_대상에_대한_결과_백분위는_그_지연_근처다() {
+        targetServer.respondWith(200, Duration.ofMillis(50));
+
+        TestResultDto result = service.executeTestWithId("test-percentile", fixedCountConfig());
+
+        assertThat(result.getP50Ms()).isBetween(45.0, 200.0);
+        assertThat(result.getP99Ms()).isGreaterThanOrEqualTo(result.getP50Ms());
+        assertThat(result.getP999Ms()).isGreaterThanOrEqualTo(result.getP99Ms());
+    }
+
+    @Test
+    void 실시간_메트릭에_평균_백분위와_런타임_지표가_실제_값으로_담긴다() {
+        targetServer.respondWith(200, Duration.ofMillis(30));
+        List<RealtimeMetricDto> metrics = new CopyOnWriteArrayList<>();
+        lenient().doAnswer(invocation -> {
+            metrics.add(invocation.getArgument(1));
+            return null;
+        }).when(messagingTemplate).convertAndSend(eq("/topic/metrics/test-realtime-fields"), any(Object.class));
+
+        service.executeTestWithId("test-realtime-fields", TestConfigDto.builder()
+                .url(targetServer.url())
+                .threadType(TestConfigDto.ThreadType.VIRTUAL)
+                .virtualThreads(5)
+                .requestsPerThread(20)
+                .build());
+
+        RealtimeMetricDto completed = metrics.get(metrics.size() - 1);
+        assertThat(completed.getStatus()).isEqualTo("COMPLETED");
+        assertThat(metrics).as("실행 도중 샘플에는 평균 응답시간이 0이 아닌 값으로 채워진다")
+                .anyMatch(m -> m.getStatus().equals("RUNNING") && m.getAvgResponseTimeMs() >= 25);
+        assertThat(completed.getP95Ms()).isGreaterThanOrEqualTo(25.0);
+        assertThat(completed.getP99Ms()).isGreaterThanOrEqualTo(completed.getP95Ms());
+        assertThat(completed.getHeapUsedBytes()).isPositive();
+        assertThat(completed.getPlatformThreadCount()).isPositive();
+        assertThat(completed.getCarrierParallelism()).isPositive();
+        assertThat(metrics).as("실행 도중에는 활성 워커가 관측된다")
+                .anyMatch(m -> m.getStatus().equals("RUNNING") && m.getActiveWorkers() > 0);
+        assertThat(completed.getActiveWorkers()).as("끝난 뒤에는 활성 워커가 없다").isZero();
+    }
+
+    @Test
+    void 결과와_저장되는_엔티티에_백분위와_런타임_지표가_담긴다() {
+        targetServer.respondWith(200, Duration.ofMillis(20));
+
+        TestResultDto result = service.executeTestWithId("test-result-fields", fixedCountConfig());
+
+        assertThat(result.getP50Ms()).isNotNull();
+        assertThat(result.getPeakHeapBytes()).isPositive();
+        assertThat(result.getPeakPlatformThreads()).isPositive();
+        assertThat(result.getGcCount()).isNotNull().isGreaterThanOrEqualTo(0);
+        assertThat(result.getGcTimeMs()).isNotNull().isGreaterThanOrEqualTo(0);
+        assertThat(result.getPinnedCount()).isNotNull().isGreaterThanOrEqualTo(0);
+        assertThat(result.getPinnedTimeMs()).isNotNull().isGreaterThanOrEqualTo(0);
+
+        org.mockito.ArgumentCaptor<TestExecution> saved = org.mockito.ArgumentCaptor.forClass(TestExecution.class);
+        verify(executionRepository).save(saved.capture());
+        TestExecution entity = saved.getValue();
+        assertThat(entity.getP50Ms()).isEqualTo(result.getP50Ms());
+        assertThat(entity.getP90Ms()).isEqualTo(result.getP90Ms());
+        assertThat(entity.getP95Ms()).isEqualTo(result.getP95Ms());
+        assertThat(entity.getP99Ms()).isEqualTo(result.getP99Ms());
+        assertThat(entity.getP999Ms()).isEqualTo(result.getP999Ms());
+        assertThat(entity.getPeakHeapBytes()).isEqualTo(result.getPeakHeapBytes());
+        assertThat(entity.getPeakPlatformThreads()).isEqualTo(result.getPeakPlatformThreads());
+        assertThat(entity.getGcCount()).isEqualTo(result.getGcCount());
+        assertThat(entity.getGcTimeMs()).isEqualTo(result.getGcTimeMs());
+        assertThat(entity.getPinnedCount()).isEqualTo(result.getPinnedCount());
+        assertThat(entity.getPinnedTimeMs()).isEqualTo(result.getPinnedTimeMs());
+    }
+
+    @Test
+    void 저장된_이력을_조회하면_백분위와_런타임_지표가_복원된다() {
+        TestExecution entity = TestExecution.builder()
+                .id(7L).url("http://x").threadType("VIRTUAL")
+                .avgResponseTimeMs(5L).minResponseTimeMs(1L).maxResponseTimeMs(9L).totalDurationMs(100L).tps(10.0)
+                .totalRequests(10).successCount(10).failCount(0)
+                .p50Ms(12.5).p90Ms(20.0).p95Ms(25.0).p99Ms(30.0).p999Ms(31.0)
+                .peakHeapBytes(1000L).peakPlatformThreads(40)
+                .gcCount(2L).gcTimeMs(15L).pinnedCount(1L).pinnedTimeMs(3L)
+                .build();
+        org.mockito.Mockito.when(executionRepository.findById(7L)).thenReturn(java.util.Optional.of(entity));
+
+        TestResultDto dto = service.getExecution(7L);
+
+        assertThat(dto.getP50Ms()).isEqualTo(12.5);
+        assertThat(dto.getP999Ms()).isEqualTo(31.0);
+        assertThat(dto.getPeakHeapBytes()).isEqualTo(1000L);
+        assertThat(dto.getPeakPlatformThreads()).isEqualTo(40);
+        assertThat(dto.getGcCount()).isEqualTo(2L);
+        assertThat(dto.getPinnedTimeMs()).isEqualTo(3L);
+    }
+
+    @Test
+    void 백분위_도입_이전에_저장된_이력은_해당_값이_null이다() {
+        TestExecution legacy = TestExecution.builder()
+                .id(8L).url("http://old").threadType("VIRTUAL")
+                .avgResponseTimeMs(5L).minResponseTimeMs(1L).maxResponseTimeMs(9L).totalDurationMs(100L).tps(10.0)
+                .totalRequests(10).successCount(10).failCount(0).build();
+        org.mockito.Mockito.when(executionRepository.findById(8L)).thenReturn(java.util.Optional.of(legacy));
+
+        TestResultDto dto = service.getExecution(8L);
+
+        assertThat(dto.getP50Ms()).isNull();
+        assertThat(dto.getPeakHeapBytes()).isNull();
+        assertThat(dto.getGcCount()).isNull();
+    }
+
+    /** read() 호출 수를 세고, 플랫폼 스레드 수를 "이름이 prefix로 시작하는 살아 있는 스레드 수"로 대체하는 프로브 */
+    private static JvmMetricsProbe probeCountingThreads(String prefix, AtomicInteger reads) {
+        return new JvmMetricsProbe(new PinningMonitor(false)) {
+            @Override
+            public Reading read() {
+                reads.incrementAndGet();
+                long alive = Thread.getAllStackTraces().keySet().stream()
+                        .filter(t -> t.isAlive() && t.getName().startsWith(prefix))
+                        .count();
+                Reading real = super.read();
+                return new Reading(real.heapUsedBytes(), (int) alive, real.gcCount(), real.gcTimeMs(),
+                        real.carrierParallelism(), real.pinnedCount(), real.pinnedTimeMs());
+            }
+        };
+    }
+
+    /** read() 호출 수만 세는 가벼운 프로브 (주기 관측 횟수를 시간에 덜 민감하게 검증하기 위함) */
+    private static JvmMetricsProbe probeCountingReads(AtomicInteger reads) {
+        return new JvmMetricsProbe(new PinningMonitor(false)) {
+            @Override
+            public Reading read() {
+                reads.incrementAndGet();
+                return super.read();
+            }
+        };
+    }
+
+    private TestExecutionService serviceWith(JvmMetricsProbe probe, Duration tick, Duration peak) {
+        return new TestExecutionService(
+                recordingFactoryRef, platformBudget, httpClient, executionRepository, messagingTemplate,
+                probe, offMonitor, samplerScheduler, tick, peak);
+    }
+
+    @Test
+    void 주기_샘플보다_짧게_끝나는_PLATFORM_실행도_실행_중의_플랫폼_스레드_피크를_기록한다() {
+        // 틱과 피크 관측기를 모두 꺼서(1시간), "워커 기동 직후 관측"만으로 피크가 잡히는지 확인한다.
+        // 풀 스레드(pu-)는 실행이 끝나면 사라지므로 시작·종료 시점의 값만 보면 0으로 기록된다.
+        targetServer.respondWith(200, Duration.ofMillis(100));
+        TestExecutionService quick = serviceWith(
+                probeCountingThreads("pu-test-peak-platform-", new AtomicInteger()),
+                Duration.ofHours(1), Duration.ofHours(1));
+
+        TestResultDto result = quick.executeTestWithId("test-peak-platform", platformConfig(10, 1));
+
+        assertThat(result.getPeakPlatformThreads())
+                .as("풀 크기(예산 4)만큼의 워커 스레드가 실행 중에 관측되어야 한다")
+                .isGreaterThanOrEqualTo(4);
+    }
+
+    @Test
+    void 피크_관측기는_실행_중_주기적으로_읽고_실행이_끝나면_멈춘다() throws Exception {
+        targetServer.respondWith(200, Duration.ofMillis(300));
+        AtomicInteger reads = new AtomicInteger();
+        TestExecutionService observed = serviceWith(
+                probeCountingReads(reads),
+                Duration.ofHours(1), Duration.ofMillis(20));
+
+        observed.executeTestWithId("test-peak-observer", fixedCountConfig());
+
+        // 기준선 1 + 시작 샘플 1 + 기동 직후 1 + 최종 1 외에, 600ms 이상 도는 동안 20ms 주기 관측이 여러 번 있어야 한다
+        assertThat(reads.get()).as("피크 관측기가 주기적으로 읽는다").isGreaterThanOrEqualTo(10);
+
+        Thread.sleep(60); // 종료 직전에 이미 시작된 관측이 끝나도록 잠깐 기다린다
+        int settled = reads.get();
+        Thread.sleep(150);
+        assertThat(reads.get()).as("끝난 실행의 관측기가 계속 읽으면 안 된다").isEqualTo(settled);
+    }
+
+    /** JFR 없이 "전달 확정 전에는 핀닝이 0건, 확정 후에는 3건"을 흉내 내는 모니터 */
+    private static class FakePinningMonitor extends PinningMonitor {
+        private final boolean running;
+        final AtomicBoolean delivered = new AtomicBoolean();
+        final AtomicInteger awaitCalls = new AtomicInteger();
+        volatile Runnable onAwait = () -> { };
+        volatile boolean confirm = true;
+
+        FakePinningMonitor(boolean running) {
+            super(false);
+            this.running = running;
+        }
+
+        @Override
+        public boolean isRunning() {
+            return running;
+        }
+
+        @Override
+        public boolean awaitDelivery() {
+            awaitCalls.incrementAndGet();
+            onAwait.run();
+            delivered.set(true); // 대기가 끝나야 지연된 이벤트가 도착한다
+            return confirm;
+        }
+
+        @Override
+        public Snapshot snapshot() {
+            return delivered.get()
+                    ? new Snapshot(3, 30, java.util.Map.of())
+                    : new Snapshot(0, 0, java.util.Map.of());
+        }
+    }
+
+    private TestExecutionService serviceWithMonitor(FakePinningMonitor monitor) {
+        return new TestExecutionService(
+                recordingFactoryRef, platformBudget, httpClient, executionRepository, messagingTemplate,
+                new JvmMetricsProbe(monitor), monitor, samplerScheduler, SAMPLE_INTERVAL, SAMPLE_INTERVAL);
+    }
+
+    @Test
+    void 최종_결과의_핀닝은_이벤트_전달을_확정한_뒤의_값이다() {
+        FakePinningMonitor monitor = new FakePinningMonitor(true);
+
+        TestResultDto result = serviceWithMonitor(monitor).executeTestWithId("test-pin-settle", fixedCountConfig());
+
+        // 확정 전에 최종 스냅샷을 만들었다면 0으로 저장된다 (마지막 구간의 핀닝이 영구히 누락)
+        assertThat(result.getPinnedCount()).isEqualTo(3);
+        assertThat(result.getPinnedTimeMs()).isEqualTo(30);
+        org.mockito.ArgumentCaptor<TestExecution> saved = org.mockito.ArgumentCaptor.forClass(TestExecution.class);
+        verify(executionRepository).save(saved.capture());
+        assertThat(saved.getValue().getPinnedCount()).isEqualTo(3);
+    }
+
+    @Test
+    void 전달_확정_대기는_PLATFORM_예산을_반환한_뒤에_한다() {
+        FakePinningMonitor monitor = new FakePinningMonitor(true);
+        AtomicInteger permitsDuringWait = new AtomicInteger(-1);
+        monitor.onAwait = () -> permitsDuringWait.set(platformBudget.availablePermits());
+
+        serviceWithMonitor(monitor).executeTestWithId("test-pin-permits", platformConfig(3, 2));
+
+        assertThat(permitsDuringWait.get())
+                .as("대기 중에 예산을 쥐고 있으면 뒤따르는 PLATFORM 실행이 불필요하게 막힌다")
+                .isEqualTo(4);
+    }
+
+    @Test
+    void 전달_확정_대기_시간은_실행_시간에_섞이지_않는다() {
+        FakePinningMonitor monitor = new FakePinningMonitor(true);
+        monitor.onAwait = () -> {
+            try {
+                Thread.sleep(400);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        };
+
+        TestResultDto result = serviceWithMonitor(monitor).executeTestWithId("test-pin-duration", fixedCountConfig());
+
+        assertThat(result.getTotalDurationMs())
+                .as("대기가 소요 시간·TPS에 섞이면 부하 도구의 측정값이 틀어진다")
+                .isLessThan(400);
+        assertThat(result.getCompletedAt()).isNotNull();
+    }
+
+    @Test
+    void 완료_메트릭의_경과_시간과_순간_TPS에도_대기_시간이_섞이지_않는다() {
+        FakePinningMonitor monitor = new FakePinningMonitor(true);
+        monitor.onAwait = () -> {
+            try {
+                Thread.sleep(400);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        };
+        java.util.concurrent.atomic.AtomicReference<RealtimeMetricDto> completed = new java.util.concurrent.atomic.AtomicReference<>();
+        lenient().doAnswer(invocation -> {
+            RealtimeMetricDto dto = invocation.getArgument(1);
+            if ("COMPLETED".equals(dto.getStatus())) {
+                completed.set(dto);
+            }
+            return null;
+        }).when(messagingTemplate).convertAndSend(eq("/topic/metrics/test-pin-elapsed"), any(Object.class));
+
+        serviceWithMonitor(monitor).executeTestWithId("test-pin-elapsed", fixedCountConfig());
+
+        assertThat(completed.get().getElapsedTimeMs())
+                .as("COMPLETED 메트릭의 경과 시간은 워커가 끝난 시각 기준이어야 한다")
+                .isLessThan(400);
+    }
+
+    @Test
+    void 꺼진_모니터는_전달_확정을_기다리지_않는다() {
+        FakePinningMonitor monitor = new FakePinningMonitor(false);
+
+        TestResultDto result = serviceWithMonitor(monitor).executeTestWithId("test-pin-off", fixedCountConfig());
+
+        assertThat(monitor.awaitCalls.get()).isZero();
+        assertThat(result.getPinnedCount()).isZero();
+    }
+
+    @Test
+    void 전달_확정이_제한_시간을_넘겨도_결과는_정상_저장되고_전송된다() {
+        FakePinningMonitor monitor = new FakePinningMonitor(true);
+        monitor.confirm = false;
+
+        TestResultDto result = serviceWithMonitor(monitor).executeTestWithId("test-pin-timeout", fixedCountConfig());
+
+        assertThat(result.getTotalRequests()).isEqualTo(10);
+        verify(executionRepository).save(any(TestExecution.class));
+        verify(messagingTemplate).convertAndSend(eq("/topic/test-complete/test-pin-timeout"), any(Object.class));
+    }
+
+    @Test
+    void COMPLETED는_전달_확정_뒤에_전송되고_그_사이에_RUNNING이_끼지_않는다() {
+        FakePinningMonitor monitor = new FakePinningMonitor(true);
+        List<String> events = new CopyOnWriteArrayList<>();
+        monitor.onAwait = () -> events.add("AWAIT");
+        lenient().doAnswer(invocation -> {
+            RealtimeMetricDto dto = invocation.getArgument(1);
+            events.add(dto.getStatus());
+            return null;
+        }).when(messagingTemplate).convertAndSend(eq("/topic/metrics/test-pin-order"), any(Object.class));
+
+        serviceWithMonitor(monitor).executeTestWithId("test-pin-order", fixedCountConfig());
+
+        int await = events.indexOf("AWAIT");
+        assertThat(await).as("전달 확정 대기가 있어야 한다").isGreaterThanOrEqualTo(0);
+        assertThat(events.subList(await + 1, events.size()))
+                .as("대기 이후에는 COMPLETED 하나만 온다")
+                .containsExactly("COMPLETED");
+    }
+
+    @Test
+    void 워커가_실패한_실행은_전달_확정을_기다리지_않는다() {
+        FakePinningMonitor monitor = new FakePinningMonitor(true);
+
+        assertThatThrownBy(() -> serviceWithFailingWorkers(monitor)
+                .executeTestWithId("test-pin-fail", fixedCountConfig()))
+                .isInstanceOf(IllegalStateException.class);
+
+        assertThat(monitor.awaitCalls.get()).as("저장하지 않는 실행은 기다릴 이유가 없다").isZero();
+    }
+
+    @Test
+    void 실행이_끝나면_샘플러_전송이_멈춘다() throws Exception {
+        List<MetricSend> sends = captureMetricSends("test-sampler-stop");
+        service.executeTestWithId("test-sampler-stop", fixedCountConfig());
+        int afterRun = sends.size();
+
+        Thread.sleep(SAMPLE_INTERVAL.toMillis() * 4);
+
+        assertThat(sends.size()).as("끝난 실행의 샘플러가 계속 전송하면 안 된다").isEqualTo(afterRun);
+    }
+
+    @Test
+    void 워커가_실패해도_샘플러_전송은_멈춘다() throws Exception {
+        List<MetricSend> sends = captureMetricSends("test-sampler-stop-fail");
+        assertThatThrownBy(() -> serviceWithFailingWorkers()
+                .executeTestWithId("test-sampler-stop-fail", fixedCountConfig()))
+                .isInstanceOf(IllegalStateException.class);
+        int afterRun = sends.size();
+
+        Thread.sleep(SAMPLE_INTERVAL.toMillis() * 4);
+
+        assertThat(sends.size()).isEqualTo(afterRun);
+    }
+
     @Test
     void 워커가_예외로_비정상_종료하면_조용히_넘어가지_않고_실패로_드러난다() {
-        // 첫 전송(시작 알림, 메인 스레드)은 통과시키고, 이후 워커가 보내는 진행 메트릭에서 예외를 던진다
-        doNothing().doThrow(new IllegalStateException("broker down"))
-                .when(messagingTemplate).convertAndSend(anyString(), any(Object.class));
-
-        assertThatThrownBy(() -> service.executeTestWithId("test-worker-fail", fixedCountConfig()))
+        assertThatThrownBy(() -> serviceWithFailingWorkers().executeTestWithId("test-worker-fail", fixedCountConfig()))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("test-worker-fail")
-                .hasRootCauseMessage("broker down");
+                .hasRootCauseMessage("worker down");
     }
 
     @Test
@@ -304,10 +753,7 @@ class TestExecutionServiceTest {
 
     @Test
     void 워커가_실패해도_PLATFORM_예산은_반환된다() {
-        doNothing().doThrow(new IllegalStateException("broker down"))
-                .when(messagingTemplate).convertAndSend(anyString(), any(Object.class));
-
-        assertThatThrownBy(() -> service.executeTestWithId("test-budget-fail", platformConfig(3, 2)))
+        assertThatThrownBy(() -> serviceWithFailingWorkers().executeTestWithId("test-budget-fail", platformConfig(3, 2)))
                 .isInstanceOf(IllegalStateException.class);
 
         assertThat(platformBudget.availablePermits())

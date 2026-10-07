@@ -9,6 +9,7 @@ import java.net.http.HttpClient;
 import java.time.Duration;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 
 @Configuration
 public class VirtualThreadConfig {
@@ -41,6 +42,15 @@ public class VirtualThreadConfig {
     @Bean(name = "httpClientExecutor")
     public ExecutorService httpClientExecutor() {
         return Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("http-", 0).factory());
+    }
+
+    /**
+     * 실행 중인 테스트의 지표를 주기적으로 읽어 전송하는 스케줄러.
+     * 실행이 여러 개여도 플랫폼 스레드 1개를 공유한다. 샘플러는 짧은 계산과 전송만 하므로 충분하다.
+     */
+    @Bean(name = "metricSamplerScheduler", destroyMethod = "shutdownNow")
+    public ScheduledExecutorService metricSamplerScheduler() {
+        return Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().name("metric-sampler").daemon().factory());
     }
 
     /**
