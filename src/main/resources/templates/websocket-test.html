@@ -612,6 +612,68 @@
                         </div>
                     </div>
 
+                    <div class="stats-grid">
+                        <div class="stat-card" title="직전 샘플 구간(1초)에 완료된 요청의 평균 응답 시간">
+                            <div class="stat-header">
+                                <span class="stat-label">Avg Response (1s)</span>
+                                <span class="stat-icon">⏱️</span>
+                            </div>
+                            <div class="stat-value" id="avgRespValue">-</div>
+                        </div>
+                        <div class="stat-card" title="시작부터 누적한 응답 시간의 95번째 백분위">
+                            <div class="stat-header">
+                                <span class="stat-label">p95</span>
+                                <span class="stat-icon">📊</span>
+                            </div>
+                            <div class="stat-value" id="p95Value">-</div>
+                        </div>
+                        <div class="stat-card" title="시작부터 누적한 응답 시간의 99번째 백분위">
+                            <div class="stat-header">
+                                <span class="stat-label">p99</span>
+                                <span class="stat-icon">📊</span>
+                            </div>
+                            <div class="stat-value" id="p99Value">-</div>
+                        </div>
+                        <div class="stat-card" title="실행 시작 이후 가상 스레드 핀닝 수. JVM 전역 증가분이라 동시에 도는 다른 실행과 섞일 수 있고, JFR 전달 지연으로 최대 약 1초 늦게 반영됩니다">
+                            <div class="stat-header">
+                                <span class="stat-label">Pinned</span>
+                                <span class="stat-icon">📌</span>
+                            </div>
+                            <div class="stat-value" id="pinnedValue">0</div>
+                        </div>
+                    </div>
+
+                    <div class="stats-grid">
+                        <div class="stat-card" title="현재 힙 사용량">
+                            <div class="stat-header">
+                                <span class="stat-label">Heap Used</span>
+                                <span class="stat-icon">🧠</span>
+                            </div>
+                            <div class="stat-value" id="heapValue">-</div>
+                        </div>
+                        <div class="stat-card" title="JVM의 플랫폼 스레드 수. 가상 스레드는 포함되지 않습니다">
+                            <div class="stat-header">
+                                <span class="stat-label">Platform Threads</span>
+                                <span class="stat-icon">🧵</span>
+                            </div>
+                            <div class="stat-value" id="platformThreadsValue">-</div>
+                        </div>
+                        <div class="stat-card" title="이 실행에서 아직 끝나지 않은 워커 수 (VIRTUAL이면 가상 스레드 수)">
+                            <div class="stat-header">
+                                <span class="stat-label">Active Workers</span>
+                                <span class="stat-icon">👷</span>
+                            </div>
+                            <div class="stat-value" id="activeWorkersValue">-</div>
+                        </div>
+                        <div class="stat-card" title="가상 스레드 캐리어(플랫폼) 스레드 풀 크기">
+                            <div class="stat-header">
+                                <span class="stat-label">Carrier Pool</span>
+                                <span class="stat-icon">🚚</span>
+                            </div>
+                            <div class="stat-value" id="carrierValue">-</div>
+                        </div>
+                    </div>
+
                     <div class="card">
                         <div class="card-body">
                             <div class="progress-section">
@@ -834,6 +896,12 @@
                                     <th>Failed</th>
                                     <th>TPS</th>
                                     <th>Avg Response</th>
+                                    <th>p50</th>
+                                    <th>p95</th>
+                                    <th>p99</th>
+                                    <th title="플랫폼 스레드만 집계 (가상 스레드 제외)">Peak Platform Threads</th>
+                                    <th>Peak Heap</th>
+                                    <th title="JVM 전역 증가분">Pinned</th>
                                     <th>Duration</th>
                                     <th>Date</th>
                                 </tr>
@@ -849,6 +917,12 @@
                                         <td><span class="badge ${test.failCount > 0 ? 'warning' : 'success'}">${test.failCount}</span></td>
                                         <td><strong>${test.tps.toFixed(2)}</strong></td>
                                         <td>${test.avgResponseTimeMs}ms</td>
+                                        <td>${fmtMs(test.p50Ms)}</td>
+                                        <td>${fmtMs(test.p95Ms)}</td>
+                                        <td>${fmtMs(test.p99Ms)}</td>
+                                        <td>${fmtCount(test.peakPlatformThreads)}</td>
+                                        <td>${fmtBytes(test.peakHeapBytes)}</td>
+                                        <td>${fmtCount(test.pinnedCount)}</td>
                                         <td>${(test.totalDurationMs / 1000).toFixed(1)}s</td>
                                         <td>${new Date(test.startedAt).toLocaleString('ko-KR', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</td>
                                     </tr>
@@ -981,6 +1055,7 @@
 
         tpsData = [];
         timeLabels = [];
+        resetRuntimeCards();
         initCharts();
 
         addLog(`→ Starting test: ${config.virtualThreads} threads × ${config.requestsPerThread} requests`, 'info');
@@ -1015,6 +1090,25 @@
         });
     }
 
+    function fmtMs(v) {
+        return (v === null || v === undefined) ? '-' : v.toFixed(1) + 'ms';
+    }
+
+    function fmtBytes(v) {
+        if (v === null || v === undefined) return '-';
+        return v >= 1073741824 ? (v / 1073741824).toFixed(2) + ' GB' : (v / 1048576).toFixed(0) + ' MB';
+    }
+
+    function fmtCount(v) {
+        return (v === null || v === undefined) ? '-' : v.toLocaleString();
+    }
+
+    function resetRuntimeCards() {
+        ['avgRespValue', 'p95Value', 'p99Value', 'heapValue', 'platformThreadsValue',
+            'activeWorkersValue', 'carrierValue'].forEach(id => document.getElementById(id).textContent = '-');
+        document.getElementById('pinnedValue').textContent = '0';
+    }
+
     function updateMetrics(metric) {
         const progress = metric.progress.toFixed(1);
 
@@ -1022,6 +1116,14 @@
         document.getElementById('successValue').textContent = metric.successCount.toLocaleString();
         document.getElementById('failedValue').textContent = metric.failCount.toLocaleString();
         document.getElementById('tpsValue').textContent = metric.currentTps.toFixed(0);
+        document.getElementById('avgRespValue').textContent = metric.avgResponseTimeMs + 'ms';
+        document.getElementById('p95Value').textContent = fmtMs(metric.p95Ms);
+        document.getElementById('p99Value').textContent = fmtMs(metric.p99Ms);
+        document.getElementById('pinnedValue').textContent = fmtCount(metric.pinnedCount);
+        document.getElementById('heapValue').textContent = fmtBytes(metric.heapUsedBytes);
+        document.getElementById('platformThreadsValue').textContent = fmtCount(metric.platformThreadCount);
+        document.getElementById('activeWorkersValue').textContent = fmtCount(metric.activeWorkers);
+        document.getElementById('carrierValue').textContent = fmtCount(metric.carrierParallelism);
 
         document.getElementById('progressBar').style.width = progress + '%';
         document.getElementById('progressPercent').textContent = progress + '%';
@@ -1058,6 +1160,11 @@
         addLog(`✓ Completed: ${result.totalRequests.toLocaleString()} requests | TPS: ${result.tps.toFixed(2)}`, 'success');
         addLog(`  ├─ Success: ${result.successCount.toLocaleString()} (${result.successRate.toFixed(1)}%)`, 'success');
         addLog(`  └─ Failed: ${result.failCount.toLocaleString()}`, result.failCount > 0 ? 'error' : 'success');
+
+        if (result.p50Ms !== null && result.p50Ms !== undefined) {
+            addLog(`  Latency p50/p90/p95/p99/p99.9: ${fmtMs(result.p50Ms)} / ${fmtMs(result.p90Ms)} / ${fmtMs(result.p95Ms)} / ${fmtMs(result.p99Ms)} / ${fmtMs(result.p999Ms)}`, 'info');
+            addLog(`  Peak heap: ${fmtBytes(result.peakHeapBytes)} | Peak platform threads: ${fmtCount(result.peakPlatformThreads)} | GC: ${fmtCount(result.gcCount)}회 (${fmtCount(result.gcTimeMs)}ms) | Pinned: ${fmtCount(result.pinnedCount)}`, 'info');
+        }
 
         // ✅ 에러가 있으면 breakdown 표시
         if (result.failCount > 0 && result.errorBreakdown) {

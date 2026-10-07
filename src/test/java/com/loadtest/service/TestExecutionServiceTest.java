@@ -333,6 +333,103 @@ class TestExecutionServiceTest {
     }
 
     @Test
+    void 실시간_메트릭에_평균_백분위와_런타임_지표가_실제_값으로_담긴다() {
+        targetServer.respondWith(200, Duration.ofMillis(30));
+        List<RealtimeMetricDto> metrics = new CopyOnWriteArrayList<>();
+        lenient().doAnswer(invocation -> {
+            metrics.add(invocation.getArgument(1));
+            return null;
+        }).when(messagingTemplate).convertAndSend(eq("/topic/metrics/test-realtime-fields"), any(Object.class));
+
+        service.executeTestWithId("test-realtime-fields", TestConfigDto.builder()
+                .url(targetServer.url())
+                .threadType(TestConfigDto.ThreadType.VIRTUAL)
+                .virtualThreads(5)
+                .requestsPerThread(20)
+                .build());
+
+        RealtimeMetricDto completed = metrics.get(metrics.size() - 1);
+        assertThat(completed.getStatus()).isEqualTo("COMPLETED");
+        assertThat(metrics).as("실행 도중 샘플에는 평균 응답시간이 0이 아닌 값으로 채워진다")
+                .anyMatch(m -> m.getStatus().equals("RUNNING") && m.getAvgResponseTimeMs() >= 25);
+        assertThat(completed.getP95Ms()).isGreaterThanOrEqualTo(25.0);
+        assertThat(completed.getP99Ms()).isGreaterThanOrEqualTo(completed.getP95Ms());
+        assertThat(completed.getHeapUsedBytes()).isPositive();
+        assertThat(completed.getPlatformThreadCount()).isPositive();
+        assertThat(completed.getCarrierParallelism()).isPositive();
+        assertThat(metrics).as("실행 도중에는 활성 워커가 관측된다")
+                .anyMatch(m -> m.getStatus().equals("RUNNING") && m.getActiveWorkers() > 0);
+        assertThat(completed.getActiveWorkers()).as("끝난 뒤에는 활성 워커가 없다").isZero();
+    }
+
+    @Test
+    void 결과와_저장되는_엔티티에_백분위와_런타임_지표가_담긴다() {
+        targetServer.respondWith(200, Duration.ofMillis(20));
+
+        TestResultDto result = service.executeTestWithId("test-result-fields", fixedCountConfig());
+
+        assertThat(result.getP50Ms()).isNotNull();
+        assertThat(result.getPeakHeapBytes()).isPositive();
+        assertThat(result.getPeakPlatformThreads()).isPositive();
+        assertThat(result.getGcCount()).isNotNull().isGreaterThanOrEqualTo(0);
+        assertThat(result.getGcTimeMs()).isNotNull().isGreaterThanOrEqualTo(0);
+        assertThat(result.getPinnedCount()).isNotNull().isGreaterThanOrEqualTo(0);
+        assertThat(result.getPinnedTimeMs()).isNotNull().isGreaterThanOrEqualTo(0);
+
+        org.mockito.ArgumentCaptor<TestExecution> saved = org.mockito.ArgumentCaptor.forClass(TestExecution.class);
+        verify(executionRepository).save(saved.capture());
+        TestExecution entity = saved.getValue();
+        assertThat(entity.getP50Ms()).isEqualTo(result.getP50Ms());
+        assertThat(entity.getP90Ms()).isEqualTo(result.getP90Ms());
+        assertThat(entity.getP95Ms()).isEqualTo(result.getP95Ms());
+        assertThat(entity.getP99Ms()).isEqualTo(result.getP99Ms());
+        assertThat(entity.getP999Ms()).isEqualTo(result.getP999Ms());
+        assertThat(entity.getPeakHeapBytes()).isEqualTo(result.getPeakHeapBytes());
+        assertThat(entity.getPeakPlatformThreads()).isEqualTo(result.getPeakPlatformThreads());
+        assertThat(entity.getGcCount()).isEqualTo(result.getGcCount());
+        assertThat(entity.getGcTimeMs()).isEqualTo(result.getGcTimeMs());
+        assertThat(entity.getPinnedCount()).isEqualTo(result.getPinnedCount());
+        assertThat(entity.getPinnedTimeMs()).isEqualTo(result.getPinnedTimeMs());
+    }
+
+    @Test
+    void 저장된_이력을_조회하면_백분위와_런타임_지표가_복원된다() {
+        TestExecution entity = TestExecution.builder()
+                .id(7L).url("http://x").threadType("VIRTUAL")
+                .avgResponseTimeMs(5L).minResponseTimeMs(1L).maxResponseTimeMs(9L).totalDurationMs(100L).tps(10.0)
+                .totalRequests(10).successCount(10).failCount(0)
+                .p50Ms(12.5).p90Ms(20.0).p95Ms(25.0).p99Ms(30.0).p999Ms(31.0)
+                .peakHeapBytes(1000L).peakPlatformThreads(40)
+                .gcCount(2L).gcTimeMs(15L).pinnedCount(1L).pinnedTimeMs(3L)
+                .build();
+        org.mockito.Mockito.when(executionRepository.findById(7L)).thenReturn(java.util.Optional.of(entity));
+
+        TestResultDto dto = service.getExecution(7L);
+
+        assertThat(dto.getP50Ms()).isEqualTo(12.5);
+        assertThat(dto.getP999Ms()).isEqualTo(31.0);
+        assertThat(dto.getPeakHeapBytes()).isEqualTo(1000L);
+        assertThat(dto.getPeakPlatformThreads()).isEqualTo(40);
+        assertThat(dto.getGcCount()).isEqualTo(2L);
+        assertThat(dto.getPinnedTimeMs()).isEqualTo(3L);
+    }
+
+    @Test
+    void 백분위_도입_이전에_저장된_이력은_해당_값이_null이다() {
+        TestExecution legacy = TestExecution.builder()
+                .id(8L).url("http://old").threadType("VIRTUAL")
+                .avgResponseTimeMs(5L).minResponseTimeMs(1L).maxResponseTimeMs(9L).totalDurationMs(100L).tps(10.0)
+                .totalRequests(10).successCount(10).failCount(0).build();
+        org.mockito.Mockito.when(executionRepository.findById(8L)).thenReturn(java.util.Optional.of(legacy));
+
+        TestResultDto dto = service.getExecution(8L);
+
+        assertThat(dto.getP50Ms()).isNull();
+        assertThat(dto.getPeakHeapBytes()).isNull();
+        assertThat(dto.getGcCount()).isNull();
+    }
+
+    @Test
     void 실행이_끝나면_샘플러_전송이_멈춘다() throws Exception {
         List<MetricSend> sends = captureMetricSends("test-sampler-stop");
         service.executeTestWithId("test-sampler-stop", fixedCountConfig());

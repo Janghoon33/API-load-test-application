@@ -157,7 +157,7 @@ public class TestExecutionService {
         LocalDateTime endTime = LocalDateTime.now();
 
         // 최종 결과 계산
-        TestResultDto result = buildResult(ctx, finalSample.cumulative(), endTime, endMillis);
+        TestResultDto result = buildResult(ctx, finalSample, endTime, endMillis);
 
         // DB에 저장하고 ID 받아오기
         Long executionId = saveExecution(config, result, ctx.startedAt(), endTime);
@@ -205,6 +205,13 @@ public class TestExecutionService {
                 .progress(progress)
                 .currentTps(sample.instantTps())
                 .avgResponseTimeMs(Math.round(sample.intervalAvgMs()))
+                .p95Ms(sample.cumulative().p95())
+                .p99Ms(sample.cumulative().p99())
+                .heapUsedBytes(sample.runtime().heapUsedBytes())
+                .platformThreadCount(sample.runtime().platformThreads())
+                .activeWorkers(sample.runtime().activeWorkers())
+                .carrierParallelism(sample.runtime().carrierParallelism())
+                .pinnedCount(sample.runtime().pinnedCount())
                 .elapsedTimeMs(sample.elapsedMs())
                 .timestamp(System.currentTimeMillis())
                 .status(status)
@@ -320,8 +327,10 @@ public class TestExecutionService {
     /**
      * 결과 DTO 생성
      */
-    private TestResultDto buildResult(TestRunContext ctx, PercentilesDto percentiles,
+    private TestResultDto buildResult(TestRunContext ctx, MetricSample finalSample,
                                       LocalDateTime endTime, long endMillis) {
+        PercentilesDto percentiles = finalSample.cumulative();
+        RuntimeSnapshot runtime = finalSample.runtime();
         int success = ctx.successCount();
         int fail = ctx.failCount();
         int totalRequests = success + fail;
@@ -342,6 +351,12 @@ public class TestExecutionService {
                 .p95Ms(percentiles.p95())
                 .p99Ms(percentiles.p99())
                 .p999Ms(percentiles.p999())
+                .peakHeapBytes(runtime.peakHeapBytes())
+                .peakPlatformThreads(runtime.peakPlatformThreads())
+                .gcCount(runtime.gcCount())
+                .gcTimeMs(runtime.gcTimeMs())
+                .pinnedCount(runtime.pinnedCount())
+                .pinnedTimeMs(runtime.pinnedTimeMs())
                 .errorBreakdown(ctx.errorBreakdown())
                 .startedAt(ctx.startedAt())
                 .completedAt(endTime)
@@ -366,6 +381,17 @@ public class TestExecutionService {
                 .maxResponseTimeMs(result.getMaxResponseTimeMs())
                 .totalDurationMs(result.getTotalDurationMs())
                 .tps(result.getTps())
+                .p50Ms(result.getP50Ms())
+                .p90Ms(result.getP90Ms())
+                .p95Ms(result.getP95Ms())
+                .p99Ms(result.getP99Ms())
+                .p999Ms(result.getP999Ms())
+                .peakHeapBytes(result.getPeakHeapBytes())
+                .peakPlatformThreads(result.getPeakPlatformThreads())
+                .gcCount(result.getGcCount())
+                .gcTimeMs(result.getGcTimeMs())
+                .pinnedCount(result.getPinnedCount())
+                .pinnedTimeMs(result.getPinnedTimeMs())
                 .startedAt(startTime)
                 .completedAt(endTime)
                 .build();
@@ -407,6 +433,17 @@ public class TestExecutionService {
                 .maxResponseTimeMs(entity.getMaxResponseTimeMs())
                 .totalDurationMs(entity.getTotalDurationMs())
                 .tps(entity.getTps())
+                .p50Ms(entity.getP50Ms())
+                .p90Ms(entity.getP90Ms())
+                .p95Ms(entity.getP95Ms())
+                .p99Ms(entity.getP99Ms())
+                .p999Ms(entity.getP999Ms())
+                .peakHeapBytes(entity.getPeakHeapBytes())
+                .peakPlatformThreads(entity.getPeakPlatformThreads())
+                .gcCount(entity.getGcCount())
+                .gcTimeMs(entity.getGcTimeMs())
+                .pinnedCount(entity.getPinnedCount())
+                .pinnedTimeMs(entity.getPinnedTimeMs())
                 .startedAt(entity.getStartedAt())
                 .completedAt(entity.getCompletedAt())
                 .build();
